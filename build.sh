@@ -12,6 +12,7 @@ APP_DIR="${BUILD_DIR}/${BUNDLE_NAME}"
 EXTENSION_DIR="${APP_DIR}/Contents/PlugIns/${EXTENSION_NAME}.appex"
 EXECUTABLE_PATH="${SCRIPT_DIR}/.build/release/${APP_NAME}"
 EXTENSION_EXECUTABLE_PATH="${SCRIPT_DIR}/.build/release/${EXTENSION_NAME}"
+APP_ICON_CATALOG="${SCRIPT_DIR}/Assets/AppIcon.xcassets"
 
 cd "${SCRIPT_DIR}"
 
@@ -21,6 +22,15 @@ rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources" "${EXTENSION_DIR}/Contents/MacOS"
 cp "${EXECUTABLE_PATH}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 cp "${EXTENSION_EXECUTABLE_PATH}" "${EXTENSION_DIR}/Contents/MacOS/${EXTENSION_NAME}"
+
+if command -v xcrun >/dev/null 2>&1; then
+    xcrun actool "${APP_ICON_CATALOG}" \
+        --compile "${APP_DIR}/Contents/Resources" \
+        --platform macosx \
+        --minimum-deployment-target 26.0 \
+        --app-icon AppIcon \
+        --output-partial-info-plist "${BUILD_DIR}/assetcatalog-info.plist" >/dev/null
+fi
 
 cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -35,6 +45,8 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
     <string>Google Home Camera Widget</string>
     <key>CFBundleDisplayName</key>
     <string>Google Home Camera Widget</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
