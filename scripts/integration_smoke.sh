@@ -10,6 +10,7 @@ cd "${REPO_DIR}"
 DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" swift build -c release
 
 ".build/release/${APP_NAME}" --smoke-test
+".build/release/${APP_NAME}" --video-smoke-test
 
 curl -L --fail --silent --show-error --max-time 10 \
     --range 0-512 \

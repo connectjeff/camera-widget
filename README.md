@@ -113,6 +113,22 @@ scripts/integration_smoke.sh
 
 The smoke script builds the app, verifies streamable-camera selection rules using mock camera data, and launches the app briefly with `CAMERA_WIDGET_USE_MOCK_CAMERAS=1` to catch immediate startup crashes without requiring Google credentials.
 
+It also runs the binary's video decode check:
+
+```bash
+.build/release/GoogleHomeCameraWidget --video-smoke-test
+```
+
+That check loads the built-in AVKit HLS preview stream and waits until `AVPlayer` decodes an actual video frame. It proves the local video player path can display video without reinstalling the app or using Google credentials.
+
+Run the credentialed real-camera smoke test after signing in:
+
+```bash
+build/GoogleHomeCameraWidget.app/Contents/MacOS/GoogleHomeCameraWidget --nest-camera-smoke-test
+```
+
+This test uses the configured Google Device Access project, discovers your actual SDM devices, chooses a streamable real Nest camera, calls Google's live-stream `executeCommand`, and then waits for real media from that camera. RTSP cameras must decode an AVPlayer frame. WebRTC cameras must receive remote video media in WKWebView after Google returns an SDP answer. If the command cannot read the app's Keychain token, run it with a short-lived OAuth access token in `GOOGLE_ACCESS_TOKEN`.
+
 To build a local `.app` bundle:
 
 ```bash
@@ -147,13 +163,12 @@ See [RELEASE.md](RELEASE.md) for package verification and GitHub release publish
 4. Click **Sign In with Google**.
 5. Complete Google's Partner Connections Manager flow and grant camera access.
 6. Verify the app lists real cameras.
-7. Watch the all-feed wall grouped by home.
-8. Click a feed to zoom into one camera.
-9. Click **All Feeds** to return to the camera wall.
-10. Toggle **Widget Mode** to keep the viewer as a compact floating camera window on the desktop.
-11. Switch to **Broadcast Bridge**, select a camera, and open the clean broadcast feed window for OBS/window capture workflows.
-12. Add the **Nest Camera Snapshot** widget from macOS widget editing.
-13. Edit the widget and choose the camera for that widget instance. You can add one widget per camera.
+7. Select one streamable camera from the grouped camera list.
+8. Confirm the selected camera starts streaming in the preview panel.
+9. Toggle **Widget Mode** to keep the viewer as a compact floating camera window on the desktop.
+10. Switch to **Broadcast Bridge**, select a camera, and open the clean broadcast feed window for OBS/window capture workflows.
+11. Add the **Nest Camera Snapshot** widget from macOS widget editing.
+12. Edit the widget and choose the camera for that widget instance. You can add one widget per camera.
 
 ## Apps
 

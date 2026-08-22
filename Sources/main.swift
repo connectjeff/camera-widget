@@ -1,6 +1,7 @@
 import AVKit
 import AppKit
 import CryptoKit
+import LocalAuthentication
 import Network
 import Security
 import SwiftUI
@@ -1640,7 +1641,7 @@ struct CameraView: View {
     @StateObject private var cameraManager = CameraManager()
     @StateObject private var liveFeedCoordinator = LiveFeedCoordinator()
     @ObservedObject private var snapshotScheduler = SnapshotScheduler.shared
-    @AppStorage("selectedTroubleshootingCameraId") private var selectedCameraId = ""
+    @State private var selectedCameraId = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1744,10 +1745,7 @@ struct CameraView: View {
         HStack(spacing: 0) {
             cameraSelectionStrip
             Divider()
-            if selectedCameraId == Constants.previewTestId {
-                TestVideoPreviewTile()
-                    .padding(12)
-            } else if let camera = selectedCamera {
+            if let camera = selectedCamera {
                 CameraFeedTile(
                     camera: camera,
                     model: liveFeedCoordinator.model(for: camera),
@@ -1763,6 +1761,9 @@ struct CameraView: View {
         .onAppear(perform: selectDefaultCameraIfNeeded)
         .onChange(of: cameraManager.cameras) {
             selectDefaultCameraIfNeeded()
+        }
+        .onChange(of: selectedCameraId) {
+            liveFeedCoordinator.reset()
         }
     }
 
@@ -1799,7 +1800,6 @@ struct CameraView: View {
     }
 
     private func selectDefaultCameraIfNeeded() {
-        if selectedCameraId == Constants.previewTestId { return }
         selectedCameraId = CameraSelectionLogic.selectedCameraId(currentId: selectedCameraId, cameras: streamableCameras)
     }
 
@@ -1869,13 +1869,12 @@ struct AppKitActionButton: NSViewRepresentable {
 }
 
 private enum CameraSelectionRow {
-    case previewTest
     case section(String)
     case camera(GoogleCamera)
 
     var isSelectable: Bool {
         switch self {
-        case .previewTest, .camera:
+        case .camera:
             return true
         case .section:
             return false
@@ -1884,8 +1883,6 @@ private enum CameraSelectionRow {
 
     var selectionId: String? {
         switch self {
-        case .previewTest:
-            return Constants.previewTestId
         case .camera(let camera):
             return camera.id
         case .section:
@@ -1911,6 +1908,8 @@ struct CameraSelectionTable: NSViewRepresentable {
         tableView.allowsMultipleSelection = false
         tableView.dataSource = context.coordinator
         tableView.delegate = context.coordinator
+        tableView.target = context.coordinator
+        tableView.action = #selector(Coordinator.rowAction(_:))
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("camera"))
         column.resizingMask = .autoresizingMask
@@ -1942,7 +1941,7 @@ struct CameraSelectionTable: NSViewRepresentable {
         }
 
         func update(cameras: [GoogleCamera], selectedCameraId: String) {
-            rows = [.previewTest]
+            rows = []
             for group in CameraSelectionLogic.groupedByHome(cameras) {
                 rows.append(.section(group.home))
                 rows.append(contentsOf: group.cameras.map { .camera($0) })
@@ -1961,6 +1960,14 @@ struct CameraSelectionTable: NSViewRepresentable {
         }
 
         func tableViewSelectionDidChange(_ notification: Notification) {
+            commitSelection()
+        }
+
+        @objc func rowAction(_ sender: NSTableView) {
+            commitSelection()
+        }
+
+        private func commitSelection() {
             guard !isProgrammaticSelection,
                   let tableView,
                   rows.indices.contains(tableView.selectedRow),
@@ -1968,9 +1975,7 @@ struct CameraSelectionTable: NSViewRepresentable {
                 return
             }
 
-            DispatchQueue.main.async {
-                self.selectedCameraId = id
-            }
+            selectedCameraId = id
         }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -2013,8 +2018,6 @@ struct CameraSelectionTable: NSViewRepresentable {
 
         private func title(for row: CameraSelectionRow) -> String {
             switch row {
-            case .previewTest:
-                return "Video Preview Test\nAVKit HLS stream"
             case .section(let home):
                 return home
             case .camera(let camera):
@@ -2027,7 +2030,7 @@ struct CameraSelectionTable: NSViewRepresentable {
             switch row {
             case .section:
                 return .systemFont(ofSize: 12, weight: .semibold)
-            default:
+            case .camera:
                 return .systemFont(ofSize: 13, weight: .regular)
             }
         }
@@ -2036,39 +2039,9 @@ struct CameraSelectionTable: NSViewRepresentable {
             switch row {
             case .section:
                 return .secondaryLabelColor
-            default:
+            case .camera:
                 return .labelColor
             }
-        }
-    }
-}
-
-struct TestVideoPreviewTile: View {
-    var body: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .bottomLeading) {
-                RTSPPlayerView(url: Constants.previewTestURL)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Video Preview Test")
-                        .font(.headline)
-                        .fontWeight(.semibold)
-                    Text("AVKit HLS stream")
-                        .font(.caption)
-                }
-                .foregroundColor(.white)
-                .padding(8)
-                .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 6))
-                .padding(8)
-            }
-            .aspectRatio(16 / 9, contentMode: .fit)
-
-            Text("If this plays, the app can render live video. Nest WebRTC still depends on Google returning a usable SDP answer.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.top, 8)
         }
     }
 }
@@ -2660,11 +2633,16 @@ struct KeychainHelper {
     }
 
     static func loadToken(service: String, account: String) -> Data? {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context
         ]
 
         var item: CFTypeRef?
@@ -2801,17 +2779,719 @@ enum IntegrationSmokeTests {
     }
 }
 
+enum VideoPreviewSmokeTest {
+    static func run() -> Int32 {
+        let item = AVPlayerItem(url: Constants.previewTestURL)
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ])
+        item.add(output)
+
+        let player = AVPlayer(playerItem: item)
+        player.play()
+
+        let deadline = Date().addingTimeInterval(20)
+        var frameSize: CGSize?
+        while Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+
+            if item.status == .failed {
+                break
+            }
+
+            let itemTime = player.currentTime()
+            if output.hasNewPixelBuffer(forItemTime: itemTime),
+               let pixelBuffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
+                frameSize = CGSize(
+                    width: CVPixelBufferGetWidth(pixelBuffer),
+                    height: CVPixelBufferGetHeight(pixelBuffer)
+                )
+                break
+            }
+        }
+
+        player.pause()
+
+        if item.status == .failed {
+            let message = item.error?.localizedDescription ?? "Unknown AVPlayerItem failure."
+            fputs("AVPlayerItem failed: \(message)\n", stderr)
+            return 1
+        }
+
+        guard let frameSize else {
+            fputs("Timed out waiting for AVPlayer to decode a video frame.\n", stderr)
+            return 1
+        }
+
+        print("Video preview smoke test passed. AVPlayer decoded a \(Int(frameSize.width))x\(Int(frameSize.height)) frame from the built-in HLS stream.")
+        return 0
+    }
+}
+
+enum CredentialedNestSmokeTest {
+    static func run() -> Int32 {
+        setbuf(stdout, nil)
+        setbuf(stderr, nil)
+
+        print("Credentialed Nest smoke test starting.")
+
+        guard !OAuth2Config.deviceAccessProjectId.isEmpty else {
+            fputs("Missing deviceAccessProjectId in Config/oauth2.local.json or GOOGLE_DEVICE_ACCESS_PROJECT_ID.\n", stderr)
+            return 1
+        }
+
+        print("Loading Google OAuth token from Keychain...")
+        guard let accessToken = validAccessToken() else {
+            fputs("No usable Google OAuth token found. Open the app once and complete Sign In with Google, or provide a short-lived token with GOOGLE_ACCESS_TOKEN for this diagnostic.\n", stderr)
+            return 1
+        }
+
+        print("Fetching real Google Device Access structures...")
+        let structuresByName = fetchStructures(accessToken: accessToken)
+
+        print("Fetching real Google Device Access devices...")
+        let devicesResult = getJSON(path: "devices", accessToken: accessToken)
+        guard case .success(let data) = devicesResult else {
+            fputs("\(errorMessage(from: devicesResult))\n", stderr)
+            return 1
+        }
+
+        let root: SDMDeviceResponse
+        do {
+            root = try JSONDecoder().decode(SDMDeviceResponse.self, from: data)
+        } catch {
+            fputs("Failed to parse real Device Access devices response: \(error.localizedDescription)\n", stderr)
+            return 1
+        }
+
+        let cameras = root.devices
+            .compactMap { camera(from: $0, structuresByName: structuresByName) }
+            .sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending }
+        let streamable = CameraSelectionLogic.streamableCameras(from: cameras)
+
+        print("Device Access returned \(root.devices.count) real devices; \(streamable.count) are streamable cameras.")
+        for camera in streamable {
+            print("- \(camera.fullDisplayName) [\(camera.supportedProtocols.joined(separator: ", "))] \(camera.resourceName)")
+        }
+
+        guard !streamable.isEmpty else {
+            fputs("No real streamable cameras were returned by Device Access.\n", stderr)
+            return 1
+        }
+
+        let requestedCameraId = argumentValue(after: "--camera-id") ?? ProcessInfo.processInfo.environment["NEST_CAMERA_SMOKE_CAMERA_ID"]
+        let selectedCamera = requestedCameraId.flatMap { id in streamable.first { $0.id == id || $0.resourceName == id } }
+            ?? streamable.first { $0.supportsRTSP }
+            ?? streamable[0]
+
+        print("Selected real camera: \(selectedCamera.fullDisplayName)")
+
+        if selectedCamera.supportsRTSP {
+            return runRTSPSmoke(camera: selectedCamera, accessToken: accessToken)
+        }
+
+        if selectedCamera.supportsWebRTC {
+            return runWebRTCSmoke(camera: selectedCamera, accessToken: accessToken)
+        }
+
+        fputs("Selected camera does not report RTSP or WebRTC support.\n", stderr)
+        return 1
+    }
+
+    fileprivate static func executeStreamCommand(
+        camera: GoogleCamera,
+        command: String,
+        params: [String: Any],
+        accessToken: String
+    ) -> Result<Data, Error> {
+        let urlString = "https://smartdevicemanagement.googleapis.com/v1/\(camera.resourceName):executeCommand"
+        guard let url = URL(string: urlString) else {
+            return .failure(NSError(domain: Constants.appName, code: -90, userInfo: [NSLocalizedDescriptionKey: "Invalid stream command URL."]))
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["command": command, "params": params])
+        } catch {
+            return .failure(error)
+        }
+
+        return send(request: request)
+    }
+
+    private static func runRTSPSmoke(camera: GoogleCamera, accessToken: String) -> Int32 {
+        print("Requesting real RTSP stream from Google...")
+        let result = executeStreamCommand(
+            camera: camera,
+            command: "sdm.devices.commands.CameraLiveStream.GenerateRtspStream",
+            params: [:],
+            accessToken: accessToken
+        )
+
+        guard case .success(let data) = result else {
+            fputs("\(errorMessage(from: result))\n", stderr)
+            return 1
+        }
+
+        do {
+            let response = try JSONDecoder().decode(GenerateRTSPStreamResponse.self, from: data)
+            guard let urlString = response.results.streamUrls?["rtspUrl"], let url = URL(string: urlString) else {
+                fputs("Google RTSP command succeeded but did not return results.streamUrls.rtspUrl.\n", stderr)
+                return 1
+            }
+
+            print("Google returned RTSP URL; attempting to decode a real video frame...")
+            return decodeFrame(from: url, label: "real Google RTSP stream")
+        } catch {
+            fputs("Failed to parse Google RTSP response: \(error.localizedDescription)\n", stderr)
+            return 1
+        }
+    }
+
+    private static func runWebRTCSmoke(camera: GoogleCamera, accessToken: String) -> Int32 {
+        print("Requesting real WebRTC stream from Google...")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        final class Box {
+            var result: Int32 = 1
+            var session: CredentialedWebRTCSmokeSession?
+        }
+        let box = Box()
+
+        let start = {
+            box.session = CredentialedWebRTCSmokeSession(camera: camera, accessToken: accessToken) { result in
+                box.result = result
+                semaphore.signal()
+            }
+            box.session?.start()
+        }
+
+        if Thread.isMainThread {
+            start()
+        } else {
+            DispatchQueue.main.async(execute: start)
+        }
+
+        let deadline = Date().addingTimeInterval(35)
+        while Date() < deadline {
+            if semaphore.wait(timeout: .now()) == .success {
+                box.session?.stop()
+                return box.result
+            }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        box.session?.stop()
+        fputs("Timed out waiting for real Google WebRTC video media.\n", stderr)
+        return 1
+    }
+
+    private static func decodeFrame(from url: URL, label: String) -> Int32 {
+        let item = AVPlayerItem(url: url)
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ])
+        item.add(output)
+
+        let player = AVPlayer(playerItem: item)
+        player.play()
+
+        let deadline = Date().addingTimeInterval(25)
+        var frameSize: CGSize?
+        while Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+
+            if item.status == .failed {
+                break
+            }
+
+            let itemTime = player.currentTime()
+            if output.hasNewPixelBuffer(forItemTime: itemTime),
+               let pixelBuffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
+                frameSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
+                break
+            }
+        }
+
+        player.pause()
+
+        if item.status == .failed {
+            let message = item.error?.localizedDescription ?? "Unknown AVPlayerItem failure."
+            fputs("AVPlayer failed for \(label): \(message)\n", stderr)
+            return 1
+        }
+
+        guard let frameSize else {
+            fputs("Timed out waiting for AVPlayer to decode a frame from \(label).\n", stderr)
+            return 1
+        }
+
+        print("Credentialed Nest smoke test passed. Decoded \(Int(frameSize.width))x\(Int(frameSize.height)) from \(label).")
+        return 0
+    }
+
+    private static func validAccessToken() -> String? {
+        if let token = ProcessInfo.processInfo.environment["GOOGLE_ACCESS_TOKEN"], !token.isEmpty {
+            print("Using GOOGLE_ACCESS_TOKEN from environment for credentialed smoke test.")
+            return token
+        }
+
+        guard let data = loadStoredToken(timeout: 8),
+              var token = try? JSONDecoder().decode(AuthToken.self, from: data) else {
+            return nil
+        }
+
+        if token.isAboutToExpire() {
+            print("Stored token is near expiry; refreshing token...")
+            guard let refreshed = refresh(token: token) else {
+                return nil
+            }
+            token = refreshed
+        }
+
+        return token.accessToken
+    }
+
+    private static func loadStoredToken(timeout: TimeInterval) -> Data? {
+        let semaphore = DispatchSemaphore(value: 0)
+        final class Box {
+            var data: Data?
+        }
+        let box = Box()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            print("Reading token from Keychain...")
+            box.data = KeychainHelper.loadToken(service: Constants.appName, account: "auth_token")
+            semaphore.signal()
+        }
+
+        guard semaphore.wait(timeout: .now() + timeout) == .success else {
+            fputs("Timed out reading Google OAuth token from Keychain. The installed app may have Keychain access that this diagnostic process cannot use.\n", stderr)
+            return nil
+        }
+
+        return box.data
+    }
+
+    private static func refresh(token: AuthToken) -> AuthToken? {
+        guard let refreshToken = token.refreshToken, let url = URL(string: Constants.tokenEndpoint) else {
+            return nil
+        }
+
+        var params = [
+            "client_id": OAuth2Config.clientId,
+            "refresh_token": refreshToken,
+            "grant_type": "refresh_token"
+        ]
+        if let clientSecret = OAuth2Config.clientSecret, !clientSecret.isEmpty {
+            params["client_secret"] = clientSecret
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = formBody(from: params)
+
+        let result = send(request: request)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        guard case .success(let data) = result,
+              let response = try? decoder.decode(TokenResponse.self, from: data) else {
+            return nil
+        }
+
+        let newToken = AuthToken(
+            accessToken: response.accessToken,
+            refreshToken: response.refreshToken ?? token.refreshToken,
+            expiresInSeconds: response.expiresIn,
+            issuedAt: Date()
+        )
+
+        if let encoded = try? JSONEncoder().encode(newToken) {
+            KeychainHelper.saveToken(encoded, service: Constants.appName, account: "auth_token")
+        }
+
+        return newToken
+    }
+
+    private static func fetchStructures(accessToken: String) -> [String: String] {
+        guard case .success(let data) = getJSON(path: "structures", accessToken: accessToken),
+              let root = try? JSONDecoder().decode(SDMStructureResponse.self, from: data) else {
+            return [:]
+        }
+
+        return Dictionary(uniqueKeysWithValues: root.structures.map { structure in
+            (structure.name, structureDisplayName(from: structure))
+        })
+    }
+
+    private static func getJSON(path: String, accessToken: String) -> Result<Data, Error> {
+        guard let url = URL(string: "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/\(path)") else {
+            return .failure(NSError(domain: Constants.appName, code: -91, userInfo: [NSLocalizedDescriptionKey: "Invalid Device Access URL."]))
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        return send(request: request)
+    }
+
+    private static func send(request: URLRequest) -> Result<Data, Error> {
+        var request = request
+        request.timeoutInterval = 20
+
+        let semaphore = DispatchSemaphore(value: 0)
+        final class Box {
+            var result: Result<Data, Error> = .failure(NSError(domain: Constants.appName, code: -92))
+        }
+        let box = Box()
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+
+            if let error {
+                box.result = .failure(error)
+                return
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse, let data else {
+                box.result = .failure(NSError(domain: Constants.appName, code: -93, userInfo: [NSLocalizedDescriptionKey: "No HTTP response."]))
+                return
+            }
+
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                let body = String(data: data, encoding: .utf8) ?? "No response body."
+                box.result = .failure(NSError(domain: Constants.appName, code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode): \(body)"]))
+                return
+            }
+
+            box.result = .success(data)
+        }
+        task.resume()
+
+        let deadline = Date().addingTimeInterval(25)
+        while Date() < deadline {
+            if semaphore.wait(timeout: .now()) == .success {
+                return box.result
+            }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        task.cancel()
+        return .failure(NSError(domain: Constants.appName, code: -94, userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for HTTP response from \(request.url?.absoluteString ?? "unknown URL")."]))
+    }
+
+    private static func camera(from device: SDMDevice, structuresByName: [String: String]) -> GoogleCamera? {
+        guard let traits = device.traits,
+              let streamTrait = traits[Constants.cameraLiveStreamTrait] else {
+            return nil
+        }
+
+        let protocols = streamTrait["supportedProtocols"]?.stringArray ?? []
+        let infoTrait = traits[Constants.infoTrait]
+        let deviceTrait = traits[Constants.deviceTrait]
+        let customName = infoTrait?["customName"]?.stringValue
+        let relation = device.parentRelations?.first
+        let structureResourceName = structureResourceName(from: relation?.parent)
+        let relationIsRoom = relation?.parent?.contains("/rooms/") == true
+        let roomName = relationIsRoom ? relation?.displayName : nil
+        let homeName = structureResourceName.flatMap { structuresByName[$0] }
+            ?? (!relationIsRoom ? relation?.displayName : nil)
+            ?? fallbackHomeName(from: structureResourceName)
+        let online = deviceTrait?["connectivity"]?["status"]?.stringValue == "ONLINE"
+
+        return GoogleCamera(
+            id: device.name,
+            resourceName: device.name,
+            displayName: customName ?? roomName ?? device.name.components(separatedBy: "/").last ?? "Camera",
+            homeName: homeName,
+            roomName: roomName,
+            brandName: "Google Nest",
+            supportedProtocols: protocols,
+            isOnline: online
+        )
+    }
+
+    private static func formBody(from params: [String: String]) -> Data? {
+        params
+            .map { key, value in "\(urlEncode(key))=\(urlEncode(value))" }
+            .joined(separator: "&")
+            .data(using: .utf8)
+    }
+
+    private static func urlEncode(_ value: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "+&=")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    private static func structureDisplayName(from structure: SDMStructure) -> String {
+        structure.traits?[Constants.structureInfoTrait]?["customName"]?.stringValue
+            ?? structure.parentRelations?.first?.displayName
+            ?? fallbackHomeName(from: structure.name)
+    }
+
+    private static func structureResourceName(from parent: String?) -> String? {
+        guard let parent,
+              let range = parent.range(of: #"/structures/[^/]+"#, options: .regularExpression) else {
+            return nil
+        }
+
+        return String(parent[..<range.upperBound])
+    }
+
+    private static func fallbackHomeName(from structureResourceName: String?) -> String {
+        guard let structureResourceName,
+              let suffix = structureResourceName.components(separatedBy: "/").last,
+              !suffix.isEmpty else {
+            return "Unknown Home"
+        }
+        return "Home \(suffix)"
+    }
+
+    private static func argumentValue(after flag: String) -> String? {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: flag),
+              arguments.indices.contains(arguments.index(after: index)) else {
+            return nil
+        }
+        return arguments[arguments.index(after: index)]
+    }
+
+    private static func errorMessage(from result: Result<Data, Error>) -> String {
+        guard case .failure(let error) = result else { return "" }
+        return error.localizedDescription
+    }
+}
+
+final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler {
+    private let camera: GoogleCamera
+    private let accessToken: String
+    private let completion: (Int32) -> Void
+    private let webView: WKWebView
+    private var completed = false
+
+    init(camera: GoogleCamera, accessToken: String, completion: @escaping (Int32) -> Void) {
+        self.camera = camera
+        self.accessToken = accessToken
+        self.completion = completion
+
+        let contentController = WKUserContentController()
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = contentController
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        configuration.allowsAirPlayForMediaPlayback = false
+        self.webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 640, height: 360), configuration: configuration)
+
+        super.init()
+        contentController.add(self, name: "native")
+    }
+
+    func start() {
+        webView.loadHTMLString(Self.html, baseURL: URL(string: "https://localhost"))
+    }
+
+    func stop() {
+        webView.evaluateJavaScript("window.stopStream && window.stopStream();")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "native")
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              let type = body["type"] as? String else {
+            return
+        }
+
+        switch type {
+        case "offer":
+            guard let sdp = body["sdp"] as? String else { return }
+            requestAnswer(offerSdp: sdp)
+        case "status":
+            if let message = body["message"] as? String {
+                print("WebRTC: \(message)")
+            }
+        case "frame":
+            let width = body["width"] as? Int ?? 0
+            let height = body["height"] as? Int ?? 0
+            print("Credentialed Nest smoke test passed. WebRTC video element received a \(width)x\(height) frame from \(camera.fullDisplayName).")
+            finish(0)
+        case "error":
+            let message = body["message"] as? String ?? "Unknown WebRTC error."
+            fputs("WebRTC smoke test failed: \(message)\n", stderr)
+            finish(1)
+        default:
+            break
+        }
+    }
+
+    private func requestAnswer(offerSdp: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = CredentialedNestSmokeTest.executeStreamCommand(
+                camera: self.camera,
+                command: "sdm.devices.commands.CameraLiveStream.GenerateWebRtcStream",
+                params: ["offerSdp": offerSdp],
+                accessToken: self.accessToken
+            )
+
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let data):
+                    do {
+                        let response = try JSONDecoder().decode(GenerateWebRTCStreamResponse.self, from: data)
+                        self.apply(answerSdp: response.results.answerSdp)
+                    } catch {
+                        fputs("Failed to parse Google WebRTC response: \(error.localizedDescription)\n", stderr)
+                        self.finish(1)
+                    }
+                case .failure(let error):
+                    fputs("Google WebRTC command failed: \(error.localizedDescription)\n", stderr)
+                    self.finish(1)
+                }
+            }
+        }
+    }
+
+    private func apply(answerSdp: String) {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: answerSdp)
+            guard let encoded = String(data: data, encoding: .utf8) else {
+                fputs("Failed to encode Google WebRTC answer for JavaScript.\n", stderr)
+                finish(1)
+                return
+            }
+            webView.evaluateJavaScript("window.applyAnswer(\(encoded));")
+        } catch {
+            fputs("Failed to encode Google WebRTC answer: \(error.localizedDescription)\n", stderr)
+            finish(1)
+        }
+    }
+
+    private func finish(_ result: Int32) {
+        guard !completed else { return }
+        completed = true
+        completion(result)
+    }
+
+    private static let html = """
+    <!doctype html>
+    <html>
+    <body>
+      <video id="remoteVideo" autoplay playsinline muted></video>
+      <script>
+        const post = (type, payload = {}) => window.webkit.messageHandlers.native.postMessage({ type, ...payload });
+        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+        let pc;
+
+        async function start() {
+          try {
+            if (!window.RTCPeerConnection) {
+              post('error', { message: 'WKWebView does not expose RTCPeerConnection on this macOS build.' });
+              return;
+            }
+
+            pc = new RTCPeerConnection({ iceServers: [] });
+            pc.ontrack = event => {
+              const [stream] = event.streams;
+              if (stream) {
+                const video = document.getElementById('remoteVideo');
+                video.srcObject = stream;
+                post('status', { message: 'Remote track received.' });
+                waitForFrame(video);
+              }
+            };
+            pc.onconnectionstatechange = () => post('status', { message: `connectionState=${pc.connectionState}` });
+            pc.oniceconnectionstatechange = () => post('status', { message: `iceConnectionState=${pc.iceConnectionState}` });
+
+            pc.addTransceiver('audio', { direction: 'recvonly' });
+            pc.addTransceiver('video', { direction: 'recvonly' });
+            pc.createDataChannel('dataSendChannel');
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            await waitForIceGatheringComplete();
+            post('offer', { sdp: pc.localDescription.sdp });
+          } catch (error) {
+            post('error', { message: error.message || String(error) });
+          }
+        }
+
+        async function waitForFrame(video) {
+          const deadline = Date.now() + 25000;
+          while (Date.now() < deadline) {
+            if (video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2) {
+              post('frame', { width: video.videoWidth, height: video.videoHeight });
+              return;
+            }
+            await sleep(100);
+          }
+          post('error', { message: `Timed out waiting for a decoded WebRTC video frame. readyState=${video.readyState}, size=${video.videoWidth}x${video.videoHeight}` });
+        }
+
+        function waitForIceGatheringComplete() {
+          if (pc.iceGatheringState === 'complete') return Promise.resolve();
+          return new Promise(resolve => {
+            const timeout = setTimeout(resolve, 3000);
+            pc.addEventListener('icegatheringstatechange', () => {
+              if (pc.iceGatheringState === 'complete') {
+                clearTimeout(timeout);
+                resolve();
+              }
+            });
+          });
+        }
+
+        window.applyAnswer = async answerSdp => {
+          try {
+            await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+            post('status', { message: 'Google WebRTC answer applied.' });
+          } catch (error) {
+            post('error', { message: error.message || String(error) });
+          }
+        };
+
+        window.stopStream = () => {
+          if (pc) {
+            pc.getSenders().forEach(sender => sender.track && sender.track.stop());
+            pc.getReceivers().forEach(receiver => receiver.track && receiver.track.stop());
+            pc.close();
+          }
+        };
+
+        start();
+      </script>
+    </body>
+    </html>
+    """
+}
+
 @main
 struct GoogleHomeCameraWidgetApp: App {
+    private static let isCredentialedSmokeTest = CommandLine.arguments.contains("--nest-camera-smoke-test")
+
     init() {
         if CommandLine.arguments.contains("--smoke-test") {
             exit(IntegrationSmokeTests.run())
+        }
+        if CommandLine.arguments.contains("--video-smoke-test") {
+            exit(VideoPreviewSmokeTest.run())
+        }
+        if Self.isCredentialedSmokeTest {
+            DispatchQueue.main.async {
+                exit(CredentialedNestSmokeTest.run())
+            }
         }
     }
 
     var body: some Scene {
         WindowGroup {
-            CameraView()
+            if Self.isCredentialedSmokeTest {
+                EmptyView()
+            } else {
+                CameraView()
+            }
         }
     }
 }
