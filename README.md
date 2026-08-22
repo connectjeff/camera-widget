@@ -1,13 +1,13 @@
 # Google Home Camera Widget for macOS
 
-A native SwiftUI macOS app for testing Google Nest camera access through Google's Device Access / Smart Device Management API.
+Two native macOS apps for viewing Google Nest cameras through Google's Device Access / Smart Device Management API:
 
-The design goal is a macOS widget that can show Google Nest camera video. This repo now has two product tracks:
+- **Nest Camera Viewer**: a launchable SwiftUI camera wall for live feeds across homes.
+- **Nest Camera Snapshot Widget**: a configurable WidgetKit widget where each widget instance can show a different camera's latest snapshot.
 
-- A companion floating camera viewer app for credentialed live-stream testing and always-on desktop viewing.
-- A real WidgetKit widget target that remains the primary widget experience to build next.
+The viewer app handles Google OAuth through Partner Connections Manager, stores tokens in macOS Keychain, discovers authorized SDM cameras across homes, shows all available feeds in one interface, lets you click any feed to zoom into a single camera, and lets you return to the all-feed wall. It requests RTSP streams for cameras that report RTSP support and attempts WebRTC playback for cameras that report WebRTC support. It also includes a compact floating mode for always-on desktop viewing.
 
-The current SwiftUI app is the companion viewer and live-stream harness. It supports Google OAuth through Partner Connections Manager, stores tokens in macOS Keychain, lists authorized SDM cameras across homes, shows all available camera feeds in one interface, lets you click a feed to zoom into a single camera, and lets you return to the all-feed wall. It requests RTSP streams for cameras that report RTSP support and attempts WebRTC playback for cameras that report WebRTC support. It includes a compact floating mode for desktop viewing.
+The widget app is a configurable snapshot surface. After the viewer discovers cameras, the widget exposes those cameras as choices. You can add one widget per camera. While the viewer app is running, an independent scheduler keeps per-camera snapshot files fresh on a 60-second cadence for the widgets.
 
 ## Status
 
@@ -18,7 +18,7 @@ The current SwiftUI app is the companion viewer and live-stream harness. It supp
 - RTSP stream command: implemented
 - RTSP playback attempt with AVKit: implemented
 - WebRTC stream command and embedded playback attempt with WebKit: implemented
-- Compact floating companion-viewer mode: implemented
+- Compact floating viewer mode: implemented
 - WidgetKit snapshot widget with per-widget camera configuration: implemented
 - Per-camera snapshot files for widget instances: implemented
 - Independent stream snapshot scheduler every 60 seconds per discovered camera: implemented
@@ -55,7 +55,7 @@ See [THIRD_PARTY.md](THIRD_PARTY.md) for required Google access, scopes, redirec
    ```
 
 6. Add your Google Account as a test user if the OAuth app is still in testing.
-7. In Partner Connections Manager during sign-in, grant the project access to the cameras you want to test.
+7. In Partner Connections Manager during sign-in, grant the project access to the cameras you want to view.
 
 Google's Device Access docs describe the required Partner Connections Manager flow and note that the SDM API uses the `sdm.service` scope. Google's camera live stream docs state that camera sessions are short-lived and that WebRTC streams require a valid SDP offer, a returned SDP answer, and a client that applies that answer promptly.
 
@@ -108,7 +108,7 @@ To install the local bundle into your user Applications folder:
 open ~/Applications/GoogleHomeCameraWidget.app
 ```
 
-## First Credentialed Test Checklist
+## First Run
 
 1. Confirm `Config/oauth2.local.json` exists and has your client ID and Device Access project ID.
 2. Run `./build.sh --install`.
@@ -119,27 +119,35 @@ open ~/Applications/GoogleHomeCameraWidget.app
 7. Watch the all-feed wall grouped by home.
 8. Click a feed to zoom into one camera.
 9. Click **All Feeds** to return to the camera wall.
-10. Toggle **Widget Mode** to keep the companion viewer as a compact floating camera window on the desktop while validating the live-stream path.
+10. Toggle **Widget Mode** to keep the viewer as a compact floating camera window on the desktop.
 11. Add the **Nest Camera Snapshot** widget from macOS widget editing.
 12. Edit the widget and choose the camera for that widget instance. You can add one widget per camera.
 
-## Widget Goal
+## Apps
 
-The goal remains a real macOS widget experience for camera viewing. The companion app is useful on its own, but it is not a replacement for the widget.
+### Nest Camera Viewer
 
-Apple's WidgetKit renders widgets from timelines in a separate process, and widgets are not continually active while onscreen. The live video implementation therefore needs a dedicated WidgetKit design pass instead of assuming the companion app window can simply become a widget.
+The viewer is the live monitoring app. It is intentionally independent from the widget snapshot surface.
 
-The implemented first widget architecture is:
+- Shows every discovered camera feed across every authorized home.
+- Groups camera feeds by home.
+- Clicks into a zoomed single-feed view.
+- Returns to the all-feed wall with **All Feeds**.
+- Supports compact floating mode for always-on desktop viewing.
+- Uses independent live-feed models for visible feeds.
 
-- The main app handles Google OAuth, camera selection, token storage, and live stream negotiation.
-- While running, the main app writes a camera catalog plus per-camera snapshot files to `~/Library/Application Support/GoogleHomeCameraWidget/`.
-- The WidgetKit extension exposes a Camera configuration parameter populated from the discovered camera catalog.
-- Each widget instance displays the latest saved snapshot and timestamp for its selected camera.
-- The companion app starts an independent hidden snapshot worker for each discovered stream-capable camera.
-- Each worker negotiates its own RTSP or WebRTC stream, captures a snapshot, writes that camera's snapshot file, and repeats on a 60-second cadence while the companion app is running.
-- The visible all-feed viewer is independent from the widget snapshot scheduler; changing zoom state in the app does not choose or limit which widget camera snapshots update.
-- The WidgetKit extension requests a timeline refresh after 60 seconds. macOS may throttle this because WidgetKit refreshes are system-managed and budgeted.
-- Continuous in-widget WebRTC/RTSP playback still needs feasibility testing against macOS WidgetKit behavior.
+### Nest Camera Snapshot Widget
+
+The widget is the configurable per-camera snapshot surface.
+
+- Each widget instance chooses one camera.
+- Widget camera choices come from the camera catalog written by the viewer app.
+- Each widget displays the latest saved snapshot and timestamp for its selected camera.
+- The viewer app runs an independent hidden snapshot worker for each discovered stream-capable camera.
+- Each worker negotiates its own RTSP or WebRTC stream, captures a snapshot, writes that camera's snapshot file, and repeats on a 60-second cadence while the viewer app is running.
+- The visible all-feed viewer is independent from the widget snapshot scheduler; changing zoom state in the viewer does not choose or limit which widget camera snapshots update.
+
+Apple's WidgetKit renders widgets from timelines in a separate process, and widgets are not continually active while onscreen. The widget requests a timeline refresh after 60 seconds, but macOS may throttle refreshes because WidgetKit updates are system-managed and budgeted. Continuous in-widget WebRTC/RTSP playback still needs feasibility validation against macOS WidgetKit behavior.
 
 ## Security
 
