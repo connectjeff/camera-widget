@@ -16,6 +16,7 @@ private enum Constants {
     static let deviceTrait = "sdm.devices.traits.Device"
     static let infoTrait = "sdm.devices.traits.Info"
     static let structureInfoTrait = "sdm.structures.traits.Info"
+    static let mockMode = ProcessInfo.processInfo.environment["CAMERA_WIDGET_USE_MOCK_CAMERAS"] == "1"
 }
 
 struct AppConfig: Decodable {
@@ -82,6 +83,65 @@ struct GoogleCamera: Identifiable, Equatable, Hashable {
     }
 }
 
+enum MockCameraFactory {
+    static func cameras() -> [GoogleCamera] {
+        [
+            GoogleCamera(
+                id: "mock-webrtc-front",
+                resourceName: "enterprises/mock/devices/front",
+                displayName: "Front Door",
+                homeName: "Main Home",
+                roomName: "Entry",
+                brandName: "Google Nest",
+                supportedProtocols: ["WEB_RTC"],
+                isOnline: true
+            ),
+            GoogleCamera(
+                id: "mock-rtsp-back",
+                resourceName: "enterprises/mock/devices/back",
+                displayName: "Back Yard",
+                homeName: "Main Home",
+                roomName: "Patio",
+                brandName: "Google Nest",
+                supportedProtocols: ["RTSP"],
+                isOnline: true
+            ),
+            GoogleCamera(
+                id: "mock-nonstream-kitchen",
+                resourceName: "enterprises/mock/devices/kitchen",
+                displayName: "Kitchen Display",
+                homeName: "Main Home",
+                roomName: "Kitchen",
+                brandName: "Google Nest",
+                supportedProtocols: [],
+                isOnline: true
+            )
+        ]
+    }
+}
+
+enum CameraSelectionLogic {
+    static func streamableCameras(from cameras: [GoogleCamera]) -> [GoogleCamera] {
+        cameras.filter { $0.supportsRTSP || $0.supportsWebRTC }
+    }
+
+    static func groupedByHome(_ cameras: [GoogleCamera]) -> [(home: String, cameras: [GoogleCamera])] {
+        Dictionary(grouping: cameras, by: \.homeName)
+            .map { home, cameras in
+                (home, cameras.sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending })
+            }
+            .sorted { $0.home.localizedCaseInsensitiveCompare($1.home) == .orderedAscending }
+    }
+
+    static func selectedCameraId(currentId: String, cameras: [GoogleCamera]) -> String {
+        guard !cameras.isEmpty else { return "" }
+        if cameras.contains(where: { $0.id == currentId }) {
+            return currentId
+        }
+        return cameras[0].id
+    }
+}
+
 struct AuthToken: Codable {
     let accessToken: String
     let refreshToken: String?
@@ -116,7 +176,12 @@ final class AuthManager: ObservableObject {
     private var codeVerifier: String?
 
     init() {
-        loadToken()
+        if Constants.mockMode {
+            token = AuthToken(accessToken: "mock-token", refreshToken: nil, expiresInSeconds: 3600, issuedAt: Date())
+            isAuthenticated = true
+        } else {
+            loadToken()
+        }
     }
 
     func loadToken() {
@@ -932,7 +997,9 @@ final class LiveFeedModel: ObservableObject {
         isStarted = true
         errorMessage = nil
 
-        if camera.supportsRTSP {
+        if Constants.mockMode {
+            status = "Mock stream ready."
+        } else if camera.supportsRTSP {
             status = "Starting RTSP..."
             authManager.validAccessToken { [weak self] result in
                 Task { @MainActor in
@@ -1131,6 +1198,15 @@ final class CameraManager: ObservableObject {
         webRTCAnswerSdp = nil
         webRTCStatus = nil
         discoverySummary = nil
+
+        if Constants.mockMode {
+            cameras = MockCameraFactory.cameras()
+            selectedCamera = cameras.first
+            discoverySummary = "Mock SDM returned \(cameras.count) devices; \(CameraSelectionLogic.streamableCameras(from: cameras).count) include camera live-stream support."
+            try? SnapshotStore.writeCatalog(cameras: cameras)
+            isLoading = false
+            return
+        }
 
         guard !OAuth2Config.deviceAccessProjectId.isEmpty else {
             isLoading = false
@@ -1621,30 +1697,9 @@ struct CameraView: View {
     }
 
     private var singleCameraView: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Picker("Camera", selection: $selectedCameraId) {
-                    ForEach(groupedStreamableCameras, id: \.home) { group in
-                        Section(group.home) {
-                            ForEach(group.cameras) { camera in
-                                Text(camera.roomName.map { "\($0) / \(camera.displayName)" } ?? camera.displayName)
-                                    .tag(camera.id)
-                            }
-                        }
-                    }
-                }
-                .frame(minWidth: 360)
-
-                Spacer()
-
-                Text(cameraManager.discoverySummary ?? "\(streamableCameras.count) streamable camera\(streamableCameras.count == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding()
-
+        HStack(spacing: 0) {
+            cameraSelectionStrip
             Divider()
-
             if let camera = selectedCamera {
                 CameraFeedTile(
                     camera: camera,
@@ -1657,16 +1712,6 @@ struct CameraView: View {
             } else {
                 ContentUnavailableView("Select a streamable camera", systemImage: "video")
             }
-
-            Divider()
-            HStack {
-                Text(snapshotScheduler.status)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
         }
         .onAppear(perform: selectDefaultCameraIfNeeded)
         .onChange(of: cameraManager.cameras) {
@@ -1674,8 +1719,67 @@ struct CameraView: View {
         }
     }
 
+    private var cameraSelectionStrip: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(cameraManager.discoverySummary ?? "\(streamableCameras.count) streamable camera\(streamableCameras.count == 1 ? "" : "s")")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(3)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(groupedStreamableCameras, id: \.home) { group in
+                        Text(group.home)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                            .padding(.top, 4)
+
+                        ForEach(group.cameras) { camera in
+                            Button {
+                                selectedCameraId = camera.id
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: selectedCameraId == camera.id ? "video.fill" : "video")
+                                        .foregroundColor(selectedCameraId == camera.id ? .accentColor : .secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(camera.displayName)
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                            .lineLimit(1)
+                                        Text(camera.roomName?.isEmpty == false ? camera.roomName! : "Unassigned Room")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(selectedCameraId == camera.id ? Color.accentColor.opacity(0.14) : Color.clear)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            Text(snapshotScheduler.status)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(3)
+        }
+        .frame(width: 220)
+        .padding(10)
+    }
+
     private var streamableCameras: [GoogleCamera] {
-        cameraManager.cameras.filter { $0.supportsRTSP || $0.supportsWebRTC }
+        CameraSelectionLogic.streamableCameras(from: cameraManager.cameras)
     }
 
     private var selectedCamera: GoogleCamera? {
@@ -1683,22 +1787,11 @@ struct CameraView: View {
     }
 
     private var groupedStreamableCameras: [(home: String, cameras: [GoogleCamera])] {
-        Dictionary(grouping: streamableCameras, by: \.homeName)
-            .map { home, cameras in
-                (home, cameras.sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending })
-            }
-            .sorted { $0.home.localizedCaseInsensitiveCompare($1.home) == .orderedAscending }
+        CameraSelectionLogic.groupedByHome(streamableCameras)
     }
 
     private func selectDefaultCameraIfNeeded() {
-        guard !streamableCameras.isEmpty else {
-            selectedCameraId = ""
-            return
-        }
-
-        if !streamableCameras.contains(where: { $0.id == selectedCameraId }) {
-            selectedCameraId = streamableCameras[0].id
-        }
+        selectedCameraId = CameraSelectionLogic.selectedCameraId(currentId: selectedCameraId, cameras: streamableCameras)
     }
 
     @ViewBuilder
@@ -1897,7 +1990,9 @@ struct CameraFeedTile: View {
             ZStack {
                 Color.black
 
-                if let rtspURL = model.rtspURL {
+                if Constants.mockMode {
+                    mockPreview
+                } else if let rtspURL = model.rtspURL {
                     RTSPPlayerView(url: rtspURL)
                         .allowsHitTesting(false)
                 } else if camera.supportsWebRTC {
@@ -1930,6 +2025,22 @@ struct CameraFeedTile: View {
         }
         .onAppear {
             model.start(authManager: authManager)
+        }
+    }
+
+    private var mockPreview: some View {
+        ZStack {
+            LinearGradient(colors: [.black, .gray.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
+            VStack(spacing: 10) {
+                Image(systemName: camera.supportsWebRTC ? "dot.radiowaves.left.and.right" : "video.fill")
+                    .font(.system(size: 48))
+                Text("Mock \(camera.supportsWebRTC ? "WebRTC" : "RTSP") Preview")
+                    .font(.headline)
+                Text(camera.fullDisplayName)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .foregroundColor(.white)
         }
     }
 
@@ -2391,8 +2502,52 @@ extension Data {
     }
 }
 
+enum IntegrationSmokeTests {
+    static func run() -> Int32 {
+        let cameras = MockCameraFactory.cameras()
+        let streamable = CameraSelectionLogic.streamableCameras(from: cameras)
+
+        guard streamable.count == 2 else {
+            fputs("Expected 2 streamable mock cameras, got \(streamable.count)\n", stderr)
+            return 1
+        }
+
+        guard streamable.allSatisfy({ $0.supportsRTSP || $0.supportsWebRTC }) else {
+            fputs("Non-streamable camera leaked into streamable selection.\n", stderr)
+            return 1
+        }
+
+        let selected = CameraSelectionLogic.selectedCameraId(currentId: "missing", cameras: streamable)
+        guard selected == streamable[0].id else {
+            fputs("Default camera selection did not choose the first streamable camera.\n", stderr)
+            return 1
+        }
+
+        let preserved = CameraSelectionLogic.selectedCameraId(currentId: streamable[1].id, cameras: streamable)
+        guard preserved == streamable[1].id else {
+            fputs("Existing streamable selection was not preserved.\n", stderr)
+            return 1
+        }
+
+        let groups = CameraSelectionLogic.groupedByHome(streamable)
+        guard groups.count == 1, groups[0].cameras.count == 2 else {
+            fputs("Unexpected grouped camera shape: \(groups)\n", stderr)
+            return 1
+        }
+
+        print("Integration smoke tests passed.")
+        return 0
+    }
+}
+
 @main
 struct GoogleHomeCameraWidgetApp: App {
+    init() {
+        if CommandLine.arguments.contains("--smoke-test") {
+            exit(IntegrationSmokeTests.run())
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             CameraView()

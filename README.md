@@ -105,6 +105,14 @@ swift build
 swift run GoogleHomeCameraWidget
 ```
 
+Run automated smoke checks:
+
+```bash
+scripts/integration_smoke.sh
+```
+
+The smoke script builds the app, verifies streamable-camera selection rules using mock camera data, and launches the app briefly with `CAMERA_WIDGET_USE_MOCK_CAMERAS=1` to catch immediate startup crashes without requiring Google credentials.
+
 To build a local `.app` bundle:
 
 ```bash
