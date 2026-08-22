@@ -90,6 +90,11 @@ if [[ "${1:-}" == "--install" ]]; then
     mkdir -p "${HOME}/Applications"
     rm -rf "${HOME}/Applications/${BUNDLE_NAME}"
     cp -R "${APP_DIR}" "${HOME}/Applications/${BUNDLE_NAME}"
+    if [[ -f "${SCRIPT_DIR}/Config/oauth2.local.json" ]]; then
+        mkdir -p "${HOME}/Library/Application Support/${APP_NAME}"
+        cp "${SCRIPT_DIR}/Config/oauth2.local.json" "${HOME}/Library/Application Support/${APP_NAME}/oauth2.json"
+        chmod 600 "${HOME}/Library/Application Support/${APP_NAME}/oauth2.json"
+    fi
     echo "Installed ${HOME}/Applications/${BUNDLE_NAME}"
 else
     echo "Built ${APP_DIR}"
