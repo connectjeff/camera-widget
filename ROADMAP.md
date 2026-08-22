@@ -12,7 +12,7 @@ Status:
 - RTSP stream request and AVKit playback attempt.
 - WebRTC stream request and embedded WebKit playback attempt.
 - Compact floating window mode.
-- Writes latest live-view snapshot and metadata every 60 seconds for the widget.
+- Writes per-camera live-view snapshots and metadata every 60 seconds for the camera currently open in the viewer.
 - Local `.app` installer through `build.sh --install`.
 
 Remaining:
@@ -34,7 +34,8 @@ Status:
 Remaining:
 
 - WidgetKit snapshot extension target.
-- Widget reads the latest saved snapshot and timestamp.
+- Each widget instance can select one discovered camera.
+- Widget reads the latest saved per-camera snapshot and timestamp.
 - Determine whether macOS WidgetKit can host continuous WebRTC/RTSP playback in practice.
 - Add an app group for sharing state if signing/sandboxing requires it.
 - If continuous playback is blocked by WidgetKit, implement the best viable widget behavior: selected-camera tile, latest safe preview state, status, and a direct handoff into the companion viewer for live video.

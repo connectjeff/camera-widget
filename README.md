@@ -17,15 +17,16 @@ The current SwiftUI app is the companion viewer and live-stream harness. It supp
 - RTSP playback attempt with AVKit: implemented
 - WebRTC stream command and embedded playback attempt with WebKit: implemented
 - Compact floating companion-viewer mode: implemented
-- WidgetKit snapshot widget: implemented
-- Companion app snapshot capture every 60 seconds: implemented
+- WidgetKit snapshot widget with per-widget camera configuration: implemented
+- Per-camera snapshot files for widget instances: implemented
+- Companion app snapshot capture every 60 seconds for the currently viewed camera: implemented
 - Packaged macOS `.app`: local build script support
 - Distributed signed/notarized release: not implemented
 - Continuous in-widget live video feasibility work: pending
 
 ## Requirements
 
-- macOS 12 or newer
+- macOS 26 or newer
 - Xcode or Apple Command Line Tools
 - A consumer Google Account that manages compatible Nest cameras
 - Google Device Access registration and a Device Access project
@@ -117,7 +118,8 @@ open ~/Applications/GoogleHomeCameraWidget.app
 8. If it reports `RTSP`, click **Start RTSP Stream**.
 9. If it reports `WEB_RTC`, the embedded WebRTC view starts automatically and requests the stream from Google.
 10. Toggle **Widget Mode** to keep the companion viewer as a compact floating camera window on the desktop while validating the live-stream path.
-11. Add the **Nest Camera Snapshot** widget from macOS widget editing. It displays the latest snapshot written by the companion app.
+11. Add the **Nest Camera Snapshot** widget from macOS widget editing.
+12. Edit the widget and choose the camera for that widget instance. You can add one widget per camera.
 
 ## Widget Goal
 
@@ -128,8 +130,10 @@ Apple's WidgetKit renders widgets from timelines in a separate process, and widg
 The implemented first widget architecture is:
 
 - The main app handles Google OAuth, camera selection, token storage, and live stream negotiation.
-- While running, the main app writes `latest-snapshot.png` and `latest-snapshot.json` to `~/Library/Application Support/GoogleHomeCameraWidget/` every 60 seconds.
-- The WidgetKit extension displays the latest saved snapshot and timestamp.
+- While running, the main app writes a camera catalog plus per-camera snapshot files to `~/Library/Application Support/GoogleHomeCameraWidget/`.
+- The WidgetKit extension exposes a Camera configuration parameter populated from the discovered camera catalog.
+- Each widget instance displays the latest saved snapshot and timestamp for its selected camera.
+- The companion app captures a new snapshot every 60 seconds for the camera currently open in the live viewer.
 - The WidgetKit extension requests a timeline refresh after 60 seconds. macOS may throttle this because WidgetKit refreshes are system-managed and budgeted.
 - Continuous in-widget WebRTC/RTSP playback still needs feasibility testing against macOS WidgetKit behavior.
 

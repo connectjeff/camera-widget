@@ -4,7 +4,7 @@ This repository is MIT licensed and currently contains only first-party Swift so
 
 ## Apple Software
 
-- macOS 12 or newer is required to run the app.
+- macOS 26 or newer is required to run the app.
 - Xcode or Apple Command Line Tools are required to build it locally.
 - The app uses Apple frameworks supplied with macOS/Xcode: SwiftUI, WidgetKit, AVKit, CryptoKit, Network, WebKit, Foundation, AppKit, and Security.
 

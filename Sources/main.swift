@@ -15,6 +15,7 @@ private enum Constants {
     static let cameraLiveStreamTrait = "sdm.devices.traits.CameraLiveStream"
     static let deviceTrait = "sdm.devices.traits.Device"
     static let infoTrait = "sdm.devices.traits.Info"
+    static let structureInfoTrait = "sdm.structures.traits.Info"
 }
 
 struct AppConfig: Decodable {
@@ -58,12 +59,25 @@ struct GoogleCamera: Identifiable, Equatable, Hashable {
     let id: String
     let resourceName: String
     let displayName: String
+    let homeName: String
+    let roomName: String?
     let brandName: String
     let supportedProtocols: [String]
     let isOnline: Bool
 
     var supportsRTSP: Bool { supportedProtocols.contains("RTSP") }
     var supportsWebRTC: Bool { supportedProtocols.contains("WEB_RTC") }
+
+    var locationLabel: String {
+        if let roomName, !roomName.isEmpty {
+            return "\(homeName) / \(roomName)"
+        }
+        return homeName
+    }
+
+    var fullDisplayName: String {
+        "\(locationLabel) / \(displayName)"
+    }
 }
 
 struct AuthToken: Codable {
@@ -369,6 +383,10 @@ struct SDMDeviceResponse: Decodable {
     let devices: [SDMDevice]
 }
 
+struct SDMStructureResponse: Decodable {
+    let structures: [SDMStructure]
+}
+
 struct SDMDevice: Decodable {
     let name: String
     let type: String?
@@ -377,7 +395,14 @@ struct SDMDevice: Decodable {
 }
 
 struct ParentRelation: Decodable {
+    let parent: String?
     let displayName: String?
+}
+
+struct SDMStructure: Decodable {
+    let name: String
+    let traits: [String: JSONValue]?
+    let parentRelations: [ParentRelation]?
 }
 
 struct GenerateRTSPStreamResponse: Decodable {
@@ -402,7 +427,10 @@ struct WebRTCStreamResults: Decodable {
 }
 
 struct SnapshotMetadata: Codable {
+    let cameraId: String
     let cameraName: String
+    let homeName: String
+    let roomName: String?
     let updatedAt: Date
 }
 
@@ -414,15 +442,19 @@ enum SnapshotStore {
             .appendingPathComponent("Library/Application Support/GoogleHomeCameraWidget", isDirectory: true)
     }
 
-    static var imageURL: URL {
-        directory.appendingPathComponent("latest-snapshot.png")
+    static var catalogURL: URL {
+        directory.appendingPathComponent("camera-catalog.json")
     }
 
-    static var metadataURL: URL {
-        directory.appendingPathComponent("latest-snapshot.json")
+    static func imageURL(for cameraId: String) -> URL {
+        directory.appendingPathComponent("latest-snapshot-\(fileToken(for: cameraId)).png")
     }
 
-    static func write(image: NSImage, cameraName: String) throws {
+    static func metadataURL(for cameraId: String) -> URL {
+        directory.appendingPathComponent("latest-snapshot-\(fileToken(for: cameraId)).json")
+    }
+
+    static func write(image: NSImage, camera: GoogleCamera) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         guard let tiff = image.tiffRepresentation,
@@ -431,13 +463,52 @@ enum SnapshotStore {
             throw NSError(domain: Constants.appName, code: -10, userInfo: [NSLocalizedDescriptionKey: "Failed to encode snapshot image."])
         }
 
-        try png.write(to: imageURL, options: .atomic)
+        try png.write(to: imageURL(for: camera.id), options: .atomic)
 
-        let metadata = SnapshotMetadata(cameraName: cameraName, updatedAt: Date())
+        let metadata = SnapshotMetadata(
+            cameraId: camera.id,
+            cameraName: camera.displayName,
+            homeName: camera.homeName,
+            roomName: camera.roomName,
+            updatedAt: Date()
+        )
         let encodedMetadata = try JSONEncoder().encode(metadata)
-        try encodedMetadata.write(to: metadataURL, options: .atomic)
+        try encodedMetadata.write(to: metadataURL(for: camera.id), options: .atomic)
 
         WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+    }
+
+    static func writeCatalog(cameras: [GoogleCamera]) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let catalog = cameras.map {
+            CameraCatalogEntry(
+                id: $0.id,
+                cameraName: $0.displayName,
+                homeName: $0.homeName,
+                roomName: $0.roomName
+            )
+        }
+        let data = try JSONEncoder().encode(catalog)
+        try data.write(to: catalogURL, options: .atomic)
+        WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+    }
+
+    private static func fileToken(for value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+struct CameraCatalogEntry: Codable, Identifiable, Hashable {
+    let id: String
+    let cameraName: String
+    let homeName: String
+    let roomName: String?
+
+    var displayName: String {
+        if let roomName, !roomName.isEmpty {
+            return "\(homeName) / \(roomName) / \(cameraName)"
+        }
+        return "\(homeName) / \(cameraName)"
     }
 }
 
@@ -595,6 +666,40 @@ final class CameraManager: ObservableObject {
     }
 
     private func fetchCameras(with accessToken: String) {
+        fetchStructures(with: accessToken) { [weak self] structuresByName in
+            Task { @MainActor in
+                self?.fetchDevices(with: accessToken, structuresByName: structuresByName)
+            }
+        }
+    }
+
+    private func fetchStructures(with accessToken: String, completion: @escaping ([String: String]) -> Void) {
+        let urlString = "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/structures"
+        guard let url = URL(string: urlString) else {
+            completion([:])
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode),
+                  let data,
+                  let root = try? JSONDecoder().decode(SDMStructureResponse.self, from: data) else {
+                completion([:])
+                return
+            }
+
+            let structures = Dictionary(uniqueKeysWithValues: root.structures.map { structure in
+                (structure.name, Self.structureDisplayName(from: structure))
+            })
+            completion(structures)
+        }.resume()
+    }
+
+    private func fetchDevices(with accessToken: String, structuresByName: [String: String]) {
         let urlString = "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/devices"
         guard let url = URL(string: urlString) else {
             isLoading = false
@@ -629,7 +734,9 @@ final class CameraManager: ObservableObject {
 
                 do {
                     let root = try JSONDecoder().decode(SDMDeviceResponse.self, from: data)
-                    self.cameras = root.devices.compactMap(Self.camera(from:))
+                    self.cameras = root.devices
+                        .compactMap { Self.camera(from: $0, structuresByName: structuresByName) }
+                        .sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending }
 
                     if let storedId = self.storedSelection,
                        let camera = self.cameras.first(where: { $0.id == storedId }) {
@@ -642,6 +749,7 @@ final class CameraManager: ObservableObject {
                         self.errorMessage = "No authorized SDM cameras were returned. Check Partner Connections Manager permissions."
                     }
 
+                    try? SnapshotStore.writeCatalog(cameras: self.cameras)
                     self.isLoading = false
                 } catch {
                     self.isLoading = false
@@ -777,7 +885,7 @@ final class CameraManager: ObservableObject {
         }.resume()
     }
 
-    private static func camera(from device: SDMDevice) -> GoogleCamera? {
+    private static func camera(from device: SDMDevice, structuresByName: [String: String]) -> GoogleCamera? {
         guard let traits = device.traits,
               let streamTrait = traits[Constants.cameraLiveStreamTrait] else {
             return nil
@@ -787,17 +895,50 @@ final class CameraManager: ObservableObject {
         let infoTrait = traits[Constants.infoTrait]
         let deviceTrait = traits[Constants.deviceTrait]
         let customName = infoTrait?["customName"]?.stringValue
-        let roomName = device.parentRelations?.first?.displayName
+        let relation = device.parentRelations?.first
+        let structureResourceName = structureResourceName(from: relation?.parent)
+        let relationIsRoom = relation?.parent?.contains("/rooms/") == true
+        let roomName = relationIsRoom ? relation?.displayName : nil
+        let homeName = structureResourceName.flatMap { structuresByName[$0] }
+            ?? (!relationIsRoom ? relation?.displayName : nil)
+            ?? fallbackHomeName(from: structureResourceName)
         let online = deviceTrait?["connectivity"]?["status"]?.stringValue == "ONLINE"
 
         return GoogleCamera(
             id: device.name,
             resourceName: device.name,
             displayName: customName ?? roomName ?? device.name.components(separatedBy: "/").last ?? "Camera",
+            homeName: homeName,
+            roomName: roomName,
             brandName: "Google Nest",
             supportedProtocols: protocols,
             isOnline: online
         )
+    }
+
+    nonisolated private static func structureDisplayName(from structure: SDMStructure) -> String {
+        structure.traits?[Constants.structureInfoTrait]?["customName"]?.stringValue
+            ?? structure.parentRelations?.first?.displayName
+            ?? fallbackHomeName(from: structure.name)
+    }
+
+    nonisolated private static func structureResourceName(from parent: String?) -> String? {
+        guard let parent,
+              let range = parent.range(of: #"/structures/[^/]+"#, options: .regularExpression) else {
+            return nil
+        }
+
+        let prefix = parent[..<range.upperBound]
+        return String(prefix)
+    }
+
+    nonisolated private static func fallbackHomeName(from structureResourceName: String?) -> String {
+        guard let structureResourceName,
+              let suffix = structureResourceName.components(separatedBy: "/").last,
+              !suffix.isEmpty else {
+            return "Unknown Home"
+        }
+        return "Home \(suffix)"
     }
 
     private static func apiErrorMessage(_ prefix: String, data: Data) -> String {
@@ -937,7 +1078,7 @@ struct CameraView: View {
                     }
                 )) {
                     ForEach(cameraManager.cameras) { camera in
-                        Text(camera.displayName).tag(camera as GoogleCamera?)
+                        Text(camera.fullDisplayName).tag(camera as GoogleCamera?)
                     }
                 }
                 .pickerStyle(.menu)
@@ -969,6 +1110,9 @@ struct CameraView: View {
                             Text(camera.displayName)
                                 .font(.title2)
                                 .fontWeight(.semibold)
+                            Text(camera.locationLabel)
+                                .font(.callout)
+                                .foregroundColor(.secondary)
                             Text(protocolSummary(for: camera))
                                 .font(.callout)
                                 .foregroundColor(.secondary)
@@ -1048,7 +1192,7 @@ struct CameraView: View {
         }
 
         do {
-            try SnapshotStore.write(image: image, cameraName: camera.displayName)
+            try SnapshotStore.write(image: image, camera: camera)
             cameraManager.webRTCStatus = "Widget snapshot updated at \(Date().formatted(date: .omitted, time: .shortened))"
         } catch {
             cameraManager.errorMessage = "Failed to write widget snapshot: \(error.localizedDescription)"
