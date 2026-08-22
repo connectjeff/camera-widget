@@ -1512,15 +1512,8 @@ struct CameraView: View {
     @StateObject private var authManager = AuthManager()
     @StateObject private var cameraManager = CameraManager()
     @StateObject private var liveFeedCoordinator = LiveFeedCoordinator()
-    @StateObject private var zoomFeedCoordinator = LiveFeedCoordinator()
-    @StateObject private var broadcastBridge = BroadcastBridgeController()
     @ObservedObject private var snapshotScheduler = SnapshotScheduler.shared
-    @AppStorage("widgetMode") private var widgetMode = false
-    @AppStorage("selectedSurface") private var selectedSurface = AppSurface.viewer.rawValue
-    @AppStorage("cameraGrouping") private var cameraGrouping = CameraGrouping.home.rawValue
-    @AppStorage("homeFilter") private var homeFilter = CameraFilter.allValue
-    @AppStorage("roomFilter") private var roomFilter = CameraFilter.allValue
-    @State private var zoomedCamera: GoogleCamera?
+    @AppStorage("selectedTroubleshootingCameraId") private var selectedCameraId = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1531,16 +1524,13 @@ struct CameraView: View {
                 loadingView
             } else if !authManager.isAuthenticated {
                 authenticationView
-            } else if cameraManager.cameras.isEmpty {
+            } else if streamableCameras.isEmpty {
                 emptyCameraView
-            } else if currentSurface == .broadcast {
-                broadcastBridgeView
             } else {
-                cameraWallView
+                singleCameraView
             }
         }
-        .frame(minWidth: widgetMode ? 520 : 900, minHeight: widgetMode ? 360 : 640)
-        .background(WindowConfigurator(widgetMode: widgetMode))
+        .frame(minWidth: 720, idealWidth: 820, minHeight: 500, idealHeight: 560)
         .onAppear {
             if authManager.isAuthenticated {
                 cameraManager.loadCameras(authManager: authManager)
@@ -1550,24 +1540,10 @@ struct CameraView: View {
 
     private var header: some View {
         HStack {
-            Label(currentSurface.title, systemImage: currentSurface.systemImage)
+            Label("Nest Camera Troubleshooter", systemImage: "video")
                 .font(.headline)
             Spacer()
             if authManager.isAuthenticated {
-                Picker("Mode", selection: $selectedSurface) {
-                    ForEach(AppSurface.allCases) { surface in
-                        Label(surface.title, systemImage: surface.systemImage)
-                            .tag(surface.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 280)
-
-                Toggle(isOn: $widgetMode) {
-                    Label("Widget Mode", systemImage: widgetMode ? "pin.fill" : "pin")
-                }
-                .toggleStyle(.button)
-
                 Button {
                     cameraManager.loadCameras(authManager: authManager)
                 } label: {
@@ -1583,10 +1559,6 @@ struct CameraView: View {
             }
         }
         .padding()
-    }
-
-    private var currentSurface: AppSurface {
-        AppSurface(rawValue: selectedSurface) ?? .viewer
     }
 
     private var loadingView: some View {
@@ -1630,9 +1602,13 @@ struct CameraView: View {
             Image(systemName: "video.slash")
                 .font(.system(size: 48))
                 .foregroundColor(.secondary)
-            Text("No authorized cameras found")
+            Text("No streamable cameras found")
                 .font(.title3)
                 .fontWeight(.semibold)
+            Text(cameraManager.discoverySummary ?? "Only cameras that report RTSP or WebRTC support are selectable.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
             errorText
             Button {
                 cameraManager.loadCameras(authManager: authManager)
@@ -1644,199 +1620,85 @@ struct CameraView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var cameraWallView: some View {
+    private var singleCameraView: some View {
         VStack(spacing: 0) {
-            if let zoomedCamera {
-                zoomedFeedView(for: zoomedCamera)
+            HStack(spacing: 12) {
+                Picker("Camera", selection: $selectedCameraId) {
+                    ForEach(groupedStreamableCameras, id: \.home) { group in
+                        Section(group.home) {
+                            ForEach(group.cameras) { camera in
+                                Text(camera.roomName.map { "\($0) / \(camera.displayName)" } ?? camera.displayName)
+                                    .tag(camera.id)
+                            }
+                        }
+                    }
+                }
+                .frame(minWidth: 360)
+
+                Spacer()
+
+                Text(cameraManager.discoverySummary ?? "\(streamableCameras.count) streamable camera\(streamableCameras.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding()
+
+            Divider()
+
+            if let camera = selectedCamera {
+                CameraFeedTile(
+                    camera: camera,
+                    model: liveFeedCoordinator.model(for: camera),
+                    authManager: authManager,
+                    isZoomed: true
+                )
+                .id(camera.id)
+                .padding(12)
             } else {
-                allFeedsGridView
+                ContentUnavailableView("Select a streamable camera", systemImage: "video")
             }
 
             Divider()
             HStack {
-                Text(cameraManager.discoverySummary ?? "\(visibleCameras.count) of \(cameraManager.cameras.count) camera\(cameraManager.cameras.count == 1 ? "" : "s") shown")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
                 Text(snapshotScheduler.status)
                     .font(.caption)
                     .foregroundColor(.secondary)
+                Spacer()
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
-    }
-
-    private var allFeedsGridView: some View {
-        VStack(spacing: 0) {
-            cameraFilters
-            Divider()
-
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 12)], spacing: 12) {
-                    ForEach(groupedVisibleCameras, id: \.id) { group in
-                        Section {
-                            ForEach(group.cameras) { camera in
-                                CameraFeedTile(
-                                    camera: camera,
-                                    model: liveFeedCoordinator.model(for: camera),
-                                    authManager: authManager,
-                                    isZoomed: false
-                                )
-                                .overlay(alignment: .topTrailing) {
-                                    Button {
-                                        zoomedCamera = camera
-                                    } label: {
-                                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                            .imageScale(.small)
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-                                    .help("Open this camera in single-feed view")
-                                    .padding(8)
-                                }
-                            }
-                        } header: {
-                            HStack {
-                                Text(group.title)
-                                    .font(.headline)
-                                Spacer()
-                            }
-                            .padding(.top, 4)
-                        }
-                    }
-                }
-                .padding()
-            }
-        }
-    }
-
-    private var cameraFilters: some View {
-        HStack(spacing: 12) {
-            Picker("Group", selection: $cameraGrouping) {
-                ForEach(CameraGrouping.allCases) { grouping in
-                    Label(grouping.title, systemImage: grouping.systemImage)
-                        .tag(grouping.rawValue)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 240)
-
-            Picker("Home", selection: $homeFilter) {
-                Text("All Homes").tag(CameraFilter.allValue)
-                ForEach(availableHomes, id: \.self) { home in
-                    Text(home).tag(home)
-                }
-            }
-            .frame(minWidth: 180)
-
-            Picker("Room", selection: $roomFilter) {
-                Text("All Rooms").tag(CameraFilter.allValue)
-                ForEach(availableRooms, id: \.self) { room in
-                    Text(room).tag(room)
-                }
-            }
-            .frame(minWidth: 180)
-
-            Spacer()
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
-        .onChange(of: homeFilter) {
-            if roomFilter != CameraFilter.allValue, !availableRooms.contains(roomFilter) {
-                roomFilter = CameraFilter.allValue
-            }
-        }
+        .onAppear(perform: selectDefaultCameraIfNeeded)
         .onChange(of: cameraManager.cameras) {
-            if homeFilter != CameraFilter.allValue, !availableHomes.contains(homeFilter) {
-                homeFilter = CameraFilter.allValue
+            selectDefaultCameraIfNeeded()
+        }
+    }
+
+    private var streamableCameras: [GoogleCamera] {
+        cameraManager.cameras.filter { $0.supportsRTSP || $0.supportsWebRTC }
+    }
+
+    private var selectedCamera: GoogleCamera? {
+        streamableCameras.first { $0.id == selectedCameraId } ?? streamableCameras.first
+    }
+
+    private var groupedStreamableCameras: [(home: String, cameras: [GoogleCamera])] {
+        Dictionary(grouping: streamableCameras, by: \.homeName)
+            .map { home, cameras in
+                (home, cameras.sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending })
             }
-            if roomFilter != CameraFilter.allValue, !availableRooms.contains(roomFilter) {
-                roomFilter = CameraFilter.allValue
-            }
-        }
+            .sorted { $0.home.localizedCaseInsensitiveCompare($1.home) == .orderedAscending }
     }
 
-    private var broadcastBridgeView: some View {
-        BroadcastBridgeView(
-            cameras: cameraManager.cameras,
-            authManager: authManager,
-            controller: broadcastBridge
-        )
-    }
-
-    private func zoomedFeedView(for camera: GoogleCamera) -> some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button {
-                    zoomedCamera = nil
-                } label: {
-                    Label("All Feeds", systemImage: "square.grid.2x2")
-                }
-
-                VStack(alignment: .leading) {
-                    Text(camera.displayName)
-                        .font(.headline)
-                    Text(camera.locationLabel)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-            }
-            .padding()
-
-            CameraFeedTile(
-                camera: camera,
-                model: zoomFeedCoordinator.model(for: camera),
-                authManager: authManager,
-                isZoomed: true
-            )
-            .padding()
-        }
-    }
-
-    private var visibleCameras: [GoogleCamera] {
-        cameraManager.cameras.filter { camera in
-            let homeMatches = homeFilter == CameraFilter.allValue || camera.homeName == homeFilter
-            let roomMatches = roomFilter == CameraFilter.allValue || roomLabel(for: camera) == roomFilter
-            return homeMatches && roomMatches
-        }
-    }
-
-    private var groupedVisibleCameras: [(id: String, title: String, cameras: [GoogleCamera])] {
-        let grouping = CameraGrouping(rawValue: cameraGrouping) ?? .home
-        let groups = Dictionary(grouping: visibleCameras) { camera in
-            grouping.groupTitle(for: camera)
+    private func selectDefaultCameraIfNeeded() {
+        guard !streamableCameras.isEmpty else {
+            selectedCameraId = ""
+            return
         }
 
-        return groups
-            .map { title, cameras in
-                (
-                    id: title,
-                    title: title,
-                    cameras: cameras.sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending }
-                )
-            }
-            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-    }
-
-    private var availableHomes: [String] {
-        Array(Set(cameraManager.cameras.map(\.homeName)))
-            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-    }
-
-    private var availableRooms: [String] {
-        let cameras = cameraManager.cameras.filter { camera in
-            homeFilter == CameraFilter.allValue || camera.homeName == homeFilter
+        if !streamableCameras.contains(where: { $0.id == selectedCameraId }) {
+            selectedCameraId = streamableCameras[0].id
         }
-
-        return Array(Set(cameras.map { roomLabel(for: $0) }))
-            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-    }
-
-    private func roomLabel(for camera: GoogleCamera) -> String {
-        camera.roomName?.isEmpty == false ? camera.roomName! : "Unassigned Room"
     }
 
     @ViewBuilder
@@ -2037,6 +1899,7 @@ struct CameraFeedTile: View {
 
                 if let rtspURL = model.rtspURL {
                     RTSPPlayerView(url: rtspURL)
+                        .allowsHitTesting(false)
                 } else if camera.supportsWebRTC {
                     WebRTCPlayerView(answerSdp: model.webRTCAnswerSdp) { offerSdp in
                         model.generateWebRTC(offerSdp: offerSdp, authManager: authManager)
@@ -2045,6 +1908,7 @@ struct CameraFeedTile: View {
                     } onError: { message in
                         model.errorMessage = message
                     }
+                    .allowsHitTesting(false)
                 } else {
                     unavailableView
                 }
@@ -2064,7 +1928,6 @@ struct CameraFeedTile: View {
                     .padding(.top, 8)
             }
         }
-        .contentShape(Rectangle())
         .onAppear {
             model.start(authManager: authManager)
         }

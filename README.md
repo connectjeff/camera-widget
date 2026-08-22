@@ -6,7 +6,7 @@ Native macOS apps and companion capabilities for viewing and sharing Google Nest
 - **Nest Camera Snapshot Widget**: a configurable WidgetKit widget where each widget instance can show a different camera's latest snapshot.
 - **Nest Broadcast Bridge**: a selected-camera broadcast surface for stream/conference workflows.
 
-The viewer app handles Google OAuth through Partner Connections Manager, stores tokens in macOS Keychain, discovers authorized SDM cameras across homes, shows all available feeds in one interface, lets you click any feed to zoom into a single camera, and lets you return to the all-feed wall. It requests RTSP streams for cameras that report RTSP support and attempts WebRTC playback for cameras that report WebRTC support. It also includes a compact floating mode for always-on desktop viewing.
+The viewer app handles Google OAuth through Partner Connections Manager, stores tokens in macOS Keychain, discovers authorized SDM cameras across homes, and currently presents a focused troubleshooting viewer for one streamable camera at a time. It requests RTSP streams for cameras that report RTSP support and attempts WebRTC playback for cameras that report WebRTC support.
 
 The widget app is a configurable snapshot surface. After the viewer discovers cameras, the widget exposes those cameras as choices. You can add one widget per camera. While the viewer app is running, an independent scheduler keeps per-camera snapshot files fresh on a 60-second cadence for the widgets.
 
@@ -16,9 +16,10 @@ The broadcast bridge lets you select any discovered camera and open a clean 16:9
 
 - Google Partner Connections Manager OAuth: implemented
 - SDM camera discovery: implemented
-- Multi-home, multi-camera feed wall: implemented
-- Home and room grouping/filtering for camera lists: implemented
-- Click-to-zoom single feed view: implemented
+- Single streamable-camera troubleshooting viewer: implemented
+- Multi-home, multi-camera feed wall: temporarily simplified for live-stream debugging
+- Home and room grouping/filtering for camera lists: temporarily simplified for live-stream debugging
+- Click-to-zoom single feed view: temporarily simplified for live-stream debugging
 - RTSP stream command: implemented
 - RTSP playback attempt with AVKit: implemented
 - WebRTC stream command and embedded playback attempt with WebKit: implemented
@@ -152,13 +153,10 @@ See [RELEASE.md](RELEASE.md) for package verification and GitHub release publish
 
 The viewer is the live monitoring app. It is intentionally independent from the widget snapshot surface.
 
-- Shows every discovered camera feed across every authorized home.
-- Groups camera feeds by home.
-- Filters and groups camera feeds by home or room.
-- Clicks into a zoomed single-feed view.
-- Returns to the all-feed wall with **All Feeds**.
-- Supports compact floating mode for always-on desktop viewing.
-- Uses independent live-feed models for visible feeds.
+- Shows one selected streamable camera at a time for live-stream troubleshooting.
+- Filters the picker to cameras that report RTSP or WebRTC support.
+- Starts streaming immediately after selecting a camera.
+- Keeps the video preview non-interactive while debugging click-related WebKit/AVKit crashes.
 
 ### Nest Camera Snapshot Widget
 
