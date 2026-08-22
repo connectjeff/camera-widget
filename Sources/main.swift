@@ -17,6 +17,7 @@ private enum Constants {
     static let infoTrait = "sdm.devices.traits.Info"
     static let structureInfoTrait = "sdm.structures.traits.Info"
     static let mockMode = ProcessInfo.processInfo.environment["CAMERA_WIDGET_USE_MOCK_CAMERAS"] == "1"
+    static let backgroundSnapshotsEnabled = ProcessInfo.processInfo.environment["CAMERA_WIDGET_ENABLE_BACKGROUND_SNAPSHOTS"] == "1"
 }
 
 struct AppConfig: Decodable {
@@ -925,6 +926,11 @@ final class LiveFeedCoordinator: ObservableObject {
         models[camera.id] = model
         return model
     }
+
+    func reset() {
+        models.values.forEach { $0.stop() }
+        models.removeAll()
+    }
 }
 
 @MainActor
@@ -983,12 +989,19 @@ final class LiveFeedModel: ObservableObject {
 
     private(set) var camera: GoogleCamera
     private var isStarted = false
+    private var webRTCTimeoutTask: Task<Void, Never>?
 
     init(camera: GoogleCamera) {
         self.camera = camera
     }
 
     func update(camera: GoogleCamera) {
+        guard self.camera.id != camera.id else {
+            self.camera = camera
+            return
+        }
+
+        stop()
         self.camera = camera
     }
 
@@ -1021,10 +1034,29 @@ final class LiveFeedModel: ObservableObject {
         }
     }
 
+    func stop() {
+        webRTCTimeoutTask?.cancel()
+        webRTCTimeoutTask = nil
+        isStarted = false
+        rtspURL = nil
+        webRTCAnswerSdp = nil
+        status = nil
+        errorMessage = nil
+    }
+
     func generateWebRTC(offerSdp: String, authManager: AuthManager) {
         guard camera.supportsWebRTC else { return }
         status = "Requesting WebRTC answer..."
         errorMessage = nil
+        webRTCTimeoutTask?.cancel()
+        webRTCTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(20))
+            await MainActor.run {
+                guard let self, self.webRTCAnswerSdp == nil, self.errorMessage == nil else { return }
+                self.status = nil
+                self.errorMessage = "Timed out waiting for Google's WebRTC answer. Try Refresh, then select this camera again."
+            }
+        }
 
         authManager.validAccessToken { [weak self] result in
             Task { @MainActor in
@@ -1042,19 +1074,27 @@ final class LiveFeedModel: ObservableObject {
                             case .success(let data):
                                 do {
                                     let response = try JSONDecoder().decode(GenerateWebRTCStreamResponse.self, from: data)
+                                    self.webRTCTimeoutTask?.cancel()
+                                    self.webRTCTimeoutTask = nil
                                     self.webRTCAnswerSdp = response.results.answerSdp
                                     self.status = "Applying WebRTC answer..."
                                 } catch {
+                                    self.webRTCTimeoutTask?.cancel()
+                                    self.webRTCTimeoutTask = nil
                                     self.status = nil
                                     self.errorMessage = "Failed to parse WebRTC response: \(error.localizedDescription)"
                                 }
                             case .failure(let error):
+                                self.webRTCTimeoutTask?.cancel()
+                                self.webRTCTimeoutTask = nil
                                 self.status = nil
                                 self.errorMessage = "WebRTC command failed: \(error.localizedDescription)"
                             }
                         }
                     }
                 case .failure(let error):
+                    self.webRTCTimeoutTask?.cancel()
+                    self.webRTCTimeoutTask = nil
                     self.status = nil
                     self.errorMessage = "Authentication failed: \(error.localizedDescription)"
                 }
@@ -1124,10 +1164,14 @@ final class LiveFeedModel: ObservableObject {
                 return
             }
 
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200..<300).contains(httpResponse.statusCode),
-                  let data else {
-                completion(.failure(NSError(domain: Constants.appName, code: -31)))
+            guard let httpResponse = response as? HTTPURLResponse, let data else {
+                completion(.failure(NSError(domain: Constants.appName, code: -31, userInfo: [NSLocalizedDescriptionKey: "No HTTP response from stream command."])))
+                return
+            }
+
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                let body = String(data: data, encoding: .utf8) ?? "No response body."
+                completion(.failure(NSError(domain: Constants.appName, code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode): \(body)"])))
                 return
             }
 
@@ -1384,7 +1428,11 @@ final class CameraManager: ObservableObject {
                     }
 
                     try? SnapshotStore.writeCatalog(cameras: self.cameras)
-                    SnapshotScheduler.shared.start(cameras: self.cameras, authManager: authManager)
+                    if Constants.backgroundSnapshotsEnabled {
+                        SnapshotScheduler.shared.start(cameras: self.cameras, authManager: authManager)
+                    } else {
+                        SnapshotScheduler.shared.stopAll()
+                    }
                     self.isLoading = false
                 } catch {
                     self.isLoading = false
@@ -1616,21 +1664,19 @@ struct CameraView: View {
 
     private var header: some View {
         HStack {
-            Label("Nest Camera Troubleshooter", systemImage: "video")
+            Label("Nest Camera Viewer", systemImage: "video")
                 .font(.headline)
             Spacer()
             if authManager.isAuthenticated {
-                Button {
+                HeaderAction(title: "Refresh", systemImage: "arrow.clockwise") {
+                    liveFeedCoordinator.reset()
                     cameraManager.loadCameras(authManager: authManager)
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
                 }
 
-                Button {
+                HeaderAction(title: "Sign Out", systemImage: "rectangle.portrait.and.arrow.right") {
+                    liveFeedCoordinator.reset()
                     SnapshotScheduler.shared.stopAll()
                     authManager.signOut()
-                } label: {
-                    Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
                 }
             }
         }
@@ -1662,12 +1708,9 @@ struct CameraView: View {
 
             errorText
 
-            Button {
+            HeaderAction(title: "Sign In with Google", systemImage: "person.crop.circle.badge.checkmark") {
                 authManager.authorize()
-            } label: {
-                Label("Sign In with Google", systemImage: "person.crop.circle.badge.checkmark")
             }
-            .keyboardShortcut(.defaultAction)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1686,10 +1729,8 @@ struct CameraView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
             errorText
-            Button {
+            HeaderAction(title: "Load Cameras", systemImage: "arrow.clockwise") {
                 cameraManager.loadCameras(authManager: authManager)
-            } label: {
-                Label("Load Cameras", systemImage: "arrow.clockwise")
             }
         }
         .padding()
@@ -1736,32 +1777,30 @@ struct CameraView: View {
                             .padding(.top, 4)
 
                         ForEach(group.cameras) { camera in
-                            Button {
-                                selectedCameraId = camera.id
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: selectedCameraId == camera.id ? "video.fill" : "video")
-                                        .foregroundColor(selectedCameraId == camera.id ? .accentColor : .secondary)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(camera.displayName)
-                                            .font(.caption)
-                                            .fontWeight(.medium)
-                                            .lineLimit(1)
-                                        Text(camera.roomName?.isEmpty == false ? camera.roomName! : "Unassigned Room")
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer(minLength: 0)
+                            HStack(spacing: 8) {
+                                Image(systemName: selectedCameraId == camera.id ? "video.fill" : "video")
+                                    .foregroundColor(selectedCameraId == camera.id ? .accentColor : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(camera.displayName)
+                                        .font(.caption)
+                                        .fontWeight(.medium)
+                                        .lineLimit(1)
+                                    Text(camera.roomName?.isEmpty == false ? camera.roomName! : "Unassigned Room")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
                                 }
-                                .contentShape(Rectangle())
+                                Spacer(minLength: 0)
                             }
-                            .buttonStyle(.plain)
                             .padding(8)
                             .background(
                                 RoundedRectangle(cornerRadius: 6)
                                     .fill(selectedCameraId == camera.id ? Color.accentColor.opacity(0.14) : Color.clear)
                             )
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                selectedCameraId = camera.id
+                            }
                         }
                     }
                 }
@@ -1769,10 +1808,10 @@ struct CameraView: View {
 
             Divider()
 
-            Text(snapshotScheduler.status)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .lineLimit(3)
+                Text(Constants.backgroundSnapshotsEnabled ? snapshotScheduler.status : "Widget snapshot updates paused while live preview is active")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(3)
         }
         .frame(width: 220)
         .padding(10)
@@ -1809,6 +1848,23 @@ struct CameraView: View {
         camera.supportedProtocols.isEmpty
             ? "No stream protocols reported by SDM."
             : "Protocols: \(camera.supportedProtocols.joined(separator: ", "))"
+    }
+}
+
+struct HeaderAction: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.callout)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+            .onTapGesture(perform: action)
+            .accessibilityAddTraits(.isButton)
     }
 }
 
