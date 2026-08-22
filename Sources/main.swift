@@ -392,27 +392,29 @@ final class AuthManager: ObservableObject {
     }
 }
 
-struct SDMDeviceResponse: Decodable {
+struct SDMDeviceResponse: Decodable, Sendable {
     let devices: [SDMDevice]
+    let nextPageToken: String?
 }
 
-struct SDMStructureResponse: Decodable {
+struct SDMStructureResponse: Decodable, Sendable {
     let structures: [SDMStructure]
+    let nextPageToken: String?
 }
 
-struct SDMDevice: Decodable {
+struct SDMDevice: Decodable, Sendable {
     let name: String
     let type: String?
     let traits: [String: JSONValue]?
     let parentRelations: [ParentRelation]?
 }
 
-struct ParentRelation: Decodable {
+struct ParentRelation: Decodable, Sendable {
     let parent: String?
     let displayName: String?
 }
 
-struct SDMStructure: Decodable {
+struct SDMStructure: Decodable, Sendable {
     let name: String
     let traits: [String: JSONValue]?
     let parentRelations: [ParentRelation]?
@@ -861,6 +863,53 @@ final class LiveFeedCoordinator: ObservableObject {
 }
 
 @MainActor
+final class BroadcastBridgeController: ObservableObject {
+    private var models: [String: LiveFeedModel] = [:]
+    private var window: NSWindow?
+
+    func model(for camera: GoogleCamera) -> LiveFeedModel {
+        if let model = models[camera.id] {
+            model.update(camera: camera)
+            return model
+        }
+
+        let model = LiveFeedModel(camera: camera)
+        models[camera.id] = model
+        return model
+    }
+
+    func openWindow(camera: GoogleCamera, authManager: AuthManager) {
+        let model = model(for: camera)
+        let rootView = BroadcastFeedWindowView(camera: camera, model: model, authManager: authManager)
+        let hostingView = NSHostingView(rootView: rootView)
+
+        let outputWindow: NSWindow
+        if let window {
+            outputWindow = window
+        } else {
+            outputWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1280, height: 720),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            outputWindow.minSize = NSSize(width: 640, height: 360)
+            outputWindow.collectionBehavior = [.fullScreenAuxiliary]
+            outputWindow.isReleasedWhenClosed = false
+            window = outputWindow
+        }
+
+        outputWindow.title = "Nest Broadcast Feed - \(camera.displayName)"
+        outputWindow.contentAspectRatio = NSSize(width: 16, height: 9)
+        outputWindow.contentView = hostingView
+        outputWindow.center()
+        outputWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        model.start(authManager: authManager)
+    }
+}
+
+@MainActor
 final class LiveFeedModel: ObservableObject {
     @Published var rtspURL: URL?
     @Published var webRTCAnswerSdp: String?
@@ -1020,7 +1069,7 @@ final class LiveFeedModel: ObservableObject {
     }
 }
 
-enum JSONValue: Decodable {
+enum JSONValue: Decodable, Sendable {
     case string(String)
     case number(Double)
     case bool(Bool)
@@ -1172,14 +1221,28 @@ final class CameraManager: ObservableObject {
         fetchStructures(with: accessToken) { [weak self] structuresByName in
             Task { @MainActor in
                 guard let self else { return }
-                self.fetchDevices(with: accessToken, structuresByName: structuresByName, authManager: authManager)
+                self.fetchDevices(with: accessToken, structuresByName: structuresByName, authManager: authManager, pageToken: nil, accumulatedDevices: [])
             }
         }
     }
 
     private func fetchStructures(with accessToken: String, completion: @escaping ([String: String]) -> Void) {
-        let urlString = "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/structures"
-        guard let url = URL(string: urlString) else {
+        fetchStructuresPage(with: accessToken, pageToken: nil, accumulatedStructures: [], completion: completion)
+    }
+
+    private func fetchStructuresPage(
+        with accessToken: String,
+        pageToken: String?,
+        accumulatedStructures: [SDMStructure],
+        completion: @escaping ([String: String]) -> Void
+    ) {
+        var components = URLComponents(string: "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/structures")
+        components?.queryItems = [URLQueryItem(name: "pageSize", value: "100")]
+        if let pageToken, !pageToken.isEmpty {
+            components?.queryItems?.append(URLQueryItem(name: "pageToken", value: pageToken))
+        }
+
+        guard let url = components?.url else {
             completion([:])
             return
         }
@@ -1196,16 +1259,41 @@ final class CameraManager: ObservableObject {
                 return
             }
 
-            let structures = Dictionary(uniqueKeysWithValues: root.structures.map { structure in
+            let allStructures = accumulatedStructures + root.structures
+
+            if let nextPageToken = root.nextPageToken, !nextPageToken.isEmpty {
+                Task { @MainActor in
+                    self.fetchStructuresPage(
+                        with: accessToken,
+                        pageToken: nextPageToken,
+                        accumulatedStructures: allStructures,
+                        completion: completion
+                    )
+                }
+                return
+            }
+
+            let structures = Dictionary(uniqueKeysWithValues: allStructures.map { structure in
                 (structure.name, Self.structureDisplayName(from: structure))
             })
             completion(structures)
         }.resume()
     }
 
-    private func fetchDevices(with accessToken: String, structuresByName: [String: String], authManager: AuthManager) {
-        let urlString = "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/devices"
-        guard let url = URL(string: urlString) else {
+    private func fetchDevices(
+        with accessToken: String,
+        structuresByName: [String: String],
+        authManager: AuthManager,
+        pageToken: String?,
+        accumulatedDevices: [SDMDevice]
+    ) {
+        var components = URLComponents(string: "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/devices")
+        components?.queryItems = [URLQueryItem(name: "pageSize", value: "100")]
+        if let pageToken, !pageToken.isEmpty {
+            components?.queryItems?.append(URLQueryItem(name: "pageToken", value: pageToken))
+        }
+
+        guard let url = components?.url else {
             isLoading = false
             errorMessage = "Invalid Device Access API URL."
             return
@@ -1238,7 +1326,20 @@ final class CameraManager: ObservableObject {
 
                 do {
                     let root = try JSONDecoder().decode(SDMDeviceResponse.self, from: data)
-                    self.cameras = root.devices
+                    let allDevices = accumulatedDevices + root.devices
+
+                    if let nextPageToken = root.nextPageToken, !nextPageToken.isEmpty {
+                        self.fetchDevices(
+                            with: accessToken,
+                            structuresByName: structuresByName,
+                            authManager: authManager,
+                            pageToken: nextPageToken,
+                            accumulatedDevices: allDevices
+                        )
+                        return
+                    }
+
+                    self.cameras = allDevices
                         .compactMap { Self.camera(from: $0, structuresByName: structuresByName) }
                         .sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending }
 
@@ -1458,8 +1559,14 @@ struct CameraView: View {
     @StateObject private var authManager = AuthManager()
     @StateObject private var cameraManager = CameraManager()
     @StateObject private var liveFeedCoordinator = LiveFeedCoordinator()
+    @StateObject private var zoomFeedCoordinator = LiveFeedCoordinator()
+    @StateObject private var broadcastBridge = BroadcastBridgeController()
     @ObservedObject private var snapshotScheduler = SnapshotScheduler.shared
     @AppStorage("widgetMode") private var widgetMode = false
+    @AppStorage("selectedSurface") private var selectedSurface = AppSurface.viewer.rawValue
+    @AppStorage("cameraGrouping") private var cameraGrouping = CameraGrouping.home.rawValue
+    @AppStorage("homeFilter") private var homeFilter = CameraFilter.allValue
+    @AppStorage("roomFilter") private var roomFilter = CameraFilter.allValue
     @State private var zoomedCamera: GoogleCamera?
 
     var body: some View {
@@ -1473,6 +1580,8 @@ struct CameraView: View {
                 authenticationView
             } else if cameraManager.cameras.isEmpty {
                 emptyCameraView
+            } else if currentSurface == .broadcast {
+                broadcastBridgeView
             } else {
                 cameraWallView
             }
@@ -1488,10 +1597,19 @@ struct CameraView: View {
 
     private var header: some View {
         HStack {
-            Label("Nest Camera Viewer", systemImage: "video")
+            Label(currentSurface.title, systemImage: currentSurface.systemImage)
                 .font(.headline)
             Spacer()
             if authManager.isAuthenticated {
+                Picker("Mode", selection: $selectedSurface) {
+                    ForEach(AppSurface.allCases) { surface in
+                        Label(surface.title, systemImage: surface.systemImage)
+                            .tag(surface.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 280)
+
                 Toggle(isOn: $widgetMode) {
                     Label("Widget Mode", systemImage: widgetMode ? "pin.fill" : "pin")
                 }
@@ -1512,6 +1630,10 @@ struct CameraView: View {
             }
         }
         .padding()
+    }
+
+    private var currentSurface: AppSurface {
+        AppSurface(rawValue: selectedSurface) ?? .viewer
     }
 
     private var loadingView: some View {
@@ -1579,11 +1701,11 @@ struct CameraView: View {
 
             Divider()
             HStack {
-                Text(snapshotScheduler.status)
+                Text("\(visibleCameras.count) of \(cameraManager.cameras.count) camera\(cameraManager.cameras.count == 1 ? "" : "s") shown")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
-                Text("\(cameraManager.cameras.count) camera\(cameraManager.cameras.count == 1 ? "" : "s")")
+                Text(snapshotScheduler.status)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -1593,33 +1715,101 @@ struct CameraView: View {
     }
 
     private var allFeedsGridView: some View {
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 12)], spacing: 12) {
-                ForEach(groupedCameras, id: \.home) { group in
-                    Section {
-                        ForEach(group.cameras) { camera in
-                            CameraFeedTile(
-                                camera: camera,
-                                model: liveFeedCoordinator.model(for: camera),
-                                authManager: authManager,
-                                isZoomed: false
-                            )
-                            .onTapGesture {
-                                zoomedCamera = camera
+        VStack(spacing: 0) {
+            cameraFilters
+            Divider()
+
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 12)], spacing: 12) {
+                    ForEach(groupedVisibleCameras, id: \.id) { group in
+                        Section {
+                            ForEach(group.cameras) { camera in
+                                CameraFeedTile(
+                                    camera: camera,
+                                    model: liveFeedCoordinator.model(for: camera),
+                                    authManager: authManager,
+                                    isZoomed: false
+                                )
+                                .overlay(alignment: .topTrailing) {
+                                    Button {
+                                        zoomedCamera = camera
+                                    } label: {
+                                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                            .imageScale(.small)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .help("Open this camera in single-feed view")
+                                    .padding(8)
+                                }
                             }
+                        } header: {
+                            HStack {
+                                Text(group.title)
+                                    .font(.headline)
+                                Spacer()
+                            }
+                            .padding(.top, 4)
                         }
-                    } header: {
-                        HStack {
-                            Text(group.home)
-                                .font(.headline)
-                            Spacer()
-                        }
-                        .padding(.top, 4)
                     }
                 }
+                .padding()
             }
-            .padding()
         }
+    }
+
+    private var cameraFilters: some View {
+        HStack(spacing: 12) {
+            Picker("Group", selection: $cameraGrouping) {
+                ForEach(CameraGrouping.allCases) { grouping in
+                    Label(grouping.title, systemImage: grouping.systemImage)
+                        .tag(grouping.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 240)
+
+            Picker("Home", selection: $homeFilter) {
+                Text("All Homes").tag(CameraFilter.allValue)
+                ForEach(availableHomes, id: \.self) { home in
+                    Text(home).tag(home)
+                }
+            }
+            .frame(minWidth: 180)
+
+            Picker("Room", selection: $roomFilter) {
+                Text("All Rooms").tag(CameraFilter.allValue)
+                ForEach(availableRooms, id: \.self) { room in
+                    Text(room).tag(room)
+                }
+            }
+            .frame(minWidth: 180)
+
+            Spacer()
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .onChange(of: homeFilter) {
+            if roomFilter != CameraFilter.allValue, !availableRooms.contains(roomFilter) {
+                roomFilter = CameraFilter.allValue
+            }
+        }
+        .onChange(of: cameraManager.cameras) {
+            if homeFilter != CameraFilter.allValue, !availableHomes.contains(homeFilter) {
+                homeFilter = CameraFilter.allValue
+            }
+            if roomFilter != CameraFilter.allValue, !availableRooms.contains(roomFilter) {
+                roomFilter = CameraFilter.allValue
+            }
+        }
+    }
+
+    private var broadcastBridgeView: some View {
+        BroadcastBridgeView(
+            cameras: cameraManager.cameras,
+            authManager: authManager,
+            controller: broadcastBridge
+        )
     }
 
     private func zoomedFeedView(for camera: GoogleCamera) -> some View {
@@ -1645,7 +1835,7 @@ struct CameraView: View {
 
             CameraFeedTile(
                 camera: camera,
-                model: liveFeedCoordinator.model(for: camera),
+                model: zoomFeedCoordinator.model(for: camera),
                 authManager: authManager,
                 isZoomed: true
             )
@@ -1653,12 +1843,47 @@ struct CameraView: View {
         }
     }
 
-    private var groupedCameras: [(home: String, cameras: [GoogleCamera])] {
-        Dictionary(grouping: cameraManager.cameras, by: \.homeName)
-            .map { home, cameras in
-                (home, cameras.sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending })
+    private var visibleCameras: [GoogleCamera] {
+        cameraManager.cameras.filter { camera in
+            let homeMatches = homeFilter == CameraFilter.allValue || camera.homeName == homeFilter
+            let roomMatches = roomFilter == CameraFilter.allValue || roomLabel(for: camera) == roomFilter
+            return homeMatches && roomMatches
+        }
+    }
+
+    private var groupedVisibleCameras: [(id: String, title: String, cameras: [GoogleCamera])] {
+        let grouping = CameraGrouping(rawValue: cameraGrouping) ?? .home
+        let groups = Dictionary(grouping: visibleCameras) { camera in
+            grouping.groupTitle(for: camera)
+        }
+
+        return groups
+            .map { title, cameras in
+                (
+                    id: title,
+                    title: title,
+                    cameras: cameras.sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending }
+                )
             }
-            .sorted { $0.home.localizedCaseInsensitiveCompare($1.home) == .orderedAscending }
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    }
+
+    private var availableHomes: [String] {
+        Array(Set(cameraManager.cameras.map(\.homeName)))
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private var availableRooms: [String] {
+        let cameras = cameraManager.cameras.filter { camera in
+            homeFilter == CameraFilter.allValue || camera.homeName == homeFilter
+        }
+
+        return Array(Set(cameras.map { roomLabel(for: $0) }))
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private func roomLabel(for camera: GoogleCamera) -> String {
+        camera.roomName?.isEmpty == false ? camera.roomName! : "Unassigned Room"
     }
 
     @ViewBuilder
@@ -1679,11 +1904,178 @@ struct CameraView: View {
     }
 }
 
+enum AppSurface: String, CaseIterable, Identifiable {
+    case viewer
+    case broadcast
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .viewer: "Nest Camera Viewer"
+        case .broadcast: "Broadcast Bridge"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .viewer: "video"
+        case .broadcast: "video.badge.waveform"
+        }
+    }
+}
+
+enum CameraGrouping: String, CaseIterable, Identifiable {
+    case home
+    case room
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .home: "Home"
+        case .room: "Room"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .home: "house"
+        case .room: "rectangle.3.group"
+        }
+    }
+
+    func groupTitle(for camera: GoogleCamera) -> String {
+        switch self {
+        case .home:
+            return camera.homeName
+        case .room:
+            if let roomName = camera.roomName, !roomName.isEmpty {
+                return "\(camera.homeName) / \(roomName)"
+            }
+            return "\(camera.homeName) / Unassigned Room"
+        }
+    }
+}
+
+enum CameraFilter {
+    static let allValue = "__all__"
+}
+
+struct BroadcastBridgeView: View {
+    let cameras: [GoogleCamera]
+    @ObservedObject var authManager: AuthManager
+    @ObservedObject var controller: BroadcastBridgeController
+    @AppStorage("broadcastCameraId") private var selectedCameraId = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 16) {
+                HStack {
+                    cameraPicker
+
+                    Button {
+                        guard let camera = selectedCamera else { return }
+                        controller.openWindow(camera: camera, authManager: authManager)
+                    } label: {
+                        Label("Open Broadcast Feed", systemImage: "rectangle.inset.filled.and.person.filled")
+                    }
+                    .disabled(selectedCamera == nil)
+                }
+
+                if let camera = selectedCamera {
+                    CameraFeedTile(
+                        camera: camera,
+                        model: controller.model(for: camera),
+                        authManager: authManager,
+                        isZoomed: true
+                    )
+                    .frame(maxWidth: 960)
+                } else {
+                    ContentUnavailableView("No camera selected", systemImage: "video.slash")
+                }
+            }
+            .padding()
+
+            Spacer(minLength: 0)
+
+            Divider()
+            HStack {
+                Label("OBS-ready capture window today", systemImage: "display")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Label("Native Teams/Zoom camera device requires a signed Core Media I/O Camera Extension", systemImage: "camera.badge.ellipsis")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        }
+        .onAppear {
+            if selectedCameraId.isEmpty, let first = cameras.first {
+                selectedCameraId = first.id
+            }
+        }
+    }
+
+    private var cameraPicker: some View {
+        Picker("Camera", selection: $selectedCameraId) {
+            ForEach(groupedCameras, id: \.home) { group in
+                Section(group.home) {
+                    ForEach(group.cameras) { camera in
+                        Text(camera.roomName.map { "\($0) / \(camera.displayName)" } ?? camera.displayName)
+                            .tag(camera.id)
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 320)
+    }
+
+    private var selectedCamera: GoogleCamera? {
+        cameras.first { $0.id == selectedCameraId } ?? cameras.first
+    }
+
+    private var groupedCameras: [(home: String, cameras: [GoogleCamera])] {
+        Dictionary(grouping: cameras, by: \.homeName)
+            .map { home, cameras in
+                (home, cameras.sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending })
+            }
+            .sorted { $0.home.localizedCaseInsensitiveCompare($1.home) == .orderedAscending }
+    }
+}
+
+struct BroadcastFeedWindowView: View {
+    let camera: GoogleCamera
+    @ObservedObject var model: LiveFeedModel
+    @ObservedObject var authManager: AuthManager
+
+    var body: some View {
+        ZStack {
+            Color.black
+            CameraFeedTile(
+                camera: camera,
+                model: model,
+                authManager: authManager,
+                isZoomed: false,
+                showsMetadata: false
+            )
+        }
+        .frame(minWidth: 640, minHeight: 360)
+        .background(Color.black)
+        .onAppear {
+            model.start(authManager: authManager)
+        }
+    }
+}
+
 struct CameraFeedTile: View {
     let camera: GoogleCamera
     @ObservedObject var model: LiveFeedModel
     let authManager: AuthManager
     let isZoomed: Bool
+    var showsMetadata = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1706,13 +2098,15 @@ struct CameraFeedTile: View {
 
                 VStack {
                     Spacer()
-                    metadataBar
+                    if showsMetadata {
+                        metadataBar
+                    }
                 }
             }
             .aspectRatio(16 / 9, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
-            if isZoomed {
+            if isZoomed, showsMetadata {
                 detailStatus
                     .padding(.top, 8)
             }

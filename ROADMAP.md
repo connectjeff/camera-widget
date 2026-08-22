@@ -43,3 +43,23 @@ Remaining:
 - Determine whether macOS WidgetKit can host continuous WebRTC/RTSP playback in practice.
 - Add an app group for sharing state if signing/sandboxing requires it.
 - If continuous playback is blocked by WidgetKit, implement the best viable widget behavior: selected-camera tile, latest safe preview state, status, and a direct handoff into the companion viewer for live video.
+
+## Track 3: Broadcast / Virtual Camera Bridge
+
+Purpose: expose a selected Google Nest camera feed to streaming and conferencing workflows.
+
+Status:
+
+- Broadcast Bridge mode in the main app.
+- Selects a camera independently from the viewer zoom state and widget snapshot selection.
+- Opens a clean 16:9 broadcast feed window for OBS window capture or conferencing screen-share workflows.
+- Reuses RTSP/WebRTC stream negotiation from the viewer.
+
+Remaining:
+
+- Validate OBS window capture against a live Nest feed.
+- Add optional local browser-source output for OBS if window capture is not enough.
+- Build a signed Core Media I/O Camera Extension so the feed appears as a native camera device in Teams, Zoom, OBS, and other camera clients.
+- Add app-group shared state between the host app and camera extension.
+- Add extension install/activation UI using System Extensions.
+- Add frame delivery from the selected Nest feed into the Core Media I/O stream source.

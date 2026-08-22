@@ -1,19 +1,23 @@
 # Google Home Camera Widget for macOS
 
-Two native macOS apps for viewing Google Nest cameras through Google's Device Access / Smart Device Management API:
+Native macOS apps and companion capabilities for viewing and sharing Google Nest cameras through Google's Device Access / Smart Device Management API:
 
 - **Nest Camera Viewer**: a launchable SwiftUI camera wall for live feeds across homes.
 - **Nest Camera Snapshot Widget**: a configurable WidgetKit widget where each widget instance can show a different camera's latest snapshot.
+- **Nest Broadcast Bridge**: a selected-camera broadcast surface for stream/conference workflows.
 
 The viewer app handles Google OAuth through Partner Connections Manager, stores tokens in macOS Keychain, discovers authorized SDM cameras across homes, shows all available feeds in one interface, lets you click any feed to zoom into a single camera, and lets you return to the all-feed wall. It requests RTSP streams for cameras that report RTSP support and attempts WebRTC playback for cameras that report WebRTC support. It also includes a compact floating mode for always-on desktop viewing.
 
 The widget app is a configurable snapshot surface. After the viewer discovers cameras, the widget exposes those cameras as choices. You can add one widget per camera. While the viewer app is running, an independent scheduler keeps per-camera snapshot files fresh on a 60-second cadence for the widgets.
+
+The broadcast bridge lets you select any discovered camera and open a clean 16:9 output window for OBS capture today. Native appearance as a Teams/Zoom camera device requires a signed macOS Core Media I/O Camera Extension, which is tracked separately because Apple packages virtual cameras as system extensions with signing and entitlement requirements.
 
 ## Status
 
 - Google Partner Connections Manager OAuth: implemented
 - SDM camera discovery: implemented
 - Multi-home, multi-camera feed wall: implemented
+- Home and room grouping/filtering for camera lists: implemented
 - Click-to-zoom single feed view: implemented
 - RTSP stream command: implemented
 - RTSP playback attempt with AVKit: implemented
@@ -22,6 +26,8 @@ The widget app is a configurable snapshot surface. After the viewer discovers ca
 - WidgetKit snapshot widget with per-widget camera configuration: implemented
 - Per-camera snapshot files for widget instances: implemented
 - Independent stream snapshot scheduler every 60 seconds per discovered camera: implemented
+- Broadcast Bridge selected-camera output window for OBS/window capture: implemented
+- Native Core Media I/O virtual camera device for Teams/Zoom camera menus: planned
 - Packaged macOS `.app`: local build script support
 - Distributed signed/notarized release: not implemented
 - Continuous in-widget live video feasibility work: pending
@@ -124,8 +130,9 @@ open ~/Applications/GoogleHomeCameraWidget.app
 8. Click a feed to zoom into one camera.
 9. Click **All Feeds** to return to the camera wall.
 10. Toggle **Widget Mode** to keep the viewer as a compact floating camera window on the desktop.
-11. Add the **Nest Camera Snapshot** widget from macOS widget editing.
-12. Edit the widget and choose the camera for that widget instance. You can add one widget per camera.
+11. Switch to **Broadcast Bridge**, select a camera, and open the clean broadcast feed window for OBS/window capture workflows.
+12. Add the **Nest Camera Snapshot** widget from macOS widget editing.
+13. Edit the widget and choose the camera for that widget instance. You can add one widget per camera.
 
 ## Apps
 
@@ -135,6 +142,7 @@ The viewer is the live monitoring app. It is intentionally independent from the 
 
 - Shows every discovered camera feed across every authorized home.
 - Groups camera feeds by home.
+- Filters and groups camera feeds by home or room.
 - Clicks into a zoomed single-feed view.
 - Returns to the all-feed wall with **All Feeds**.
 - Supports compact floating mode for always-on desktop viewing.
@@ -152,6 +160,16 @@ The widget is the configurable per-camera snapshot surface.
 - The visible all-feed viewer is independent from the widget snapshot scheduler; changing zoom state in the viewer does not choose or limit which widget camera snapshots update.
 
 Apple's WidgetKit renders widgets from timelines in a separate process, and widgets are not continually active while onscreen. The widget requests a timeline refresh after 60 seconds, but macOS may throttle refreshes because WidgetKit updates are system-managed and budgeted. Continuous in-widget WebRTC/RTSP playback still needs feasibility validation against macOS WidgetKit behavior.
+
+### Nest Broadcast Bridge
+
+The broadcast bridge is the selected-camera sharing surface.
+
+- Selects any camera discovered by the authenticated viewer session.
+- Opens a dedicated 16:9 output window titled for the selected camera.
+- Uses the same live-feed negotiation as the viewer while staying independent from the viewer grid and widget snapshot workers.
+- Provides an OBS-friendly capture surface immediately.
+- Tracks native Teams/Zoom camera-menu support as a Core Media I/O Camera Extension, which requires a signed system extension host app and app-group communication.
 
 ## Security
 
