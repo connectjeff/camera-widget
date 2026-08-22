@@ -6,7 +6,7 @@ This repository is MIT licensed and currently contains only first-party Swift so
 
 - macOS 12 or newer is required to run the app.
 - Xcode or Apple Command Line Tools are required to build it locally.
-- The app uses Apple frameworks supplied with macOS/Xcode: SwiftUI, AVKit, CryptoKit, Network, Foundation, and Security.
+- The app uses Apple frameworks supplied with macOS/Xcode: SwiftUI, WidgetKit, AVKit, CryptoKit, Network, WebKit, Foundation, AppKit, and Security.
 
 ## Google Access
 
@@ -24,4 +24,4 @@ Google may charge a one-time Device Access registration fee and may impose API q
 
 ## Camera Streaming Notes
 
-Google Nest Device Access reports camera streaming support per device. Older devices may support RTSP, while many current Google Home managed cameras report WebRTC only. This app can request and attempt to play RTSP streams. Native WebRTC playback requires an additional WebRTC client integration and is intentionally called out in the app instead of being simulated.
+Google Nest Device Access reports camera streaming support per device. Older devices may support RTSP, while many current Google Home managed cameras report WebRTC only. This app can request RTSP streams and attempts WebRTC playback through an embedded WebKit view that creates a receive-only SDP offer and applies Google's returned SDP answer. Live stream behavior still depends on Google's account, project, camera model, protocol support, quotas, and current API behavior.

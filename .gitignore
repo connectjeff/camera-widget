@@ -1,4 +1,5 @@
 .build/
+.swiftpm/
 build/
 DerivedData/
 *.xcodeproj/
@@ -7,4 +8,3 @@ DerivedData/
 
 # Local Google OAuth / Device Access credentials. Use Config/oauth2.example.json as the template.
 Config/oauth2.local.json
-
