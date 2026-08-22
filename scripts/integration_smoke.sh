@@ -11,6 +11,11 @@ DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" swi
 
 ".build/release/${APP_NAME}" --smoke-test
 
+curl -L --fail --silent --show-error --max-time 10 \
+    --range 0-512 \
+    https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/gear4/prog_index.m3u8 >/dev/null
+echo "Preview test HLS stream is reachable."
+
 CAMERA_WIDGET_USE_MOCK_CAMERAS=1 ".build/release/${APP_NAME}" &
 pid="$!"
 

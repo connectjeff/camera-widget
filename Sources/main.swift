@@ -1,4 +1,5 @@
 import AVKit
+import AppKit
 import CryptoKit
 import Network
 import Security
@@ -18,6 +19,8 @@ private enum Constants {
     static let structureInfoTrait = "sdm.structures.traits.Info"
     static let mockMode = ProcessInfo.processInfo.environment["CAMERA_WIDGET_USE_MOCK_CAMERAS"] == "1"
     static let backgroundSnapshotsEnabled = ProcessInfo.processInfo.environment["CAMERA_WIDGET_ENABLE_BACKGROUND_SNAPSHOTS"] == "1"
+    static let previewTestId = "__video_preview_test__"
+    static let previewTestURL = URL(string: "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/gear4/prog_index.m3u8")!
 }
 
 struct AppConfig: Decodable {
@@ -1741,7 +1744,10 @@ struct CameraView: View {
         HStack(spacing: 0) {
             cameraSelectionStrip
             Divider()
-            if let camera = selectedCamera {
+            if selectedCameraId == Constants.previewTestId {
+                TestVideoPreviewTile()
+                    .padding(12)
+            } else if let camera = selectedCamera {
                 CameraFeedTile(
                     camera: camera,
                     model: liveFeedCoordinator.model(for: camera),
@@ -1767,44 +1773,7 @@ struct CameraView: View {
                 .foregroundColor(.secondary)
                 .lineLimit(3)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(groupedStreamableCameras, id: \.home) { group in
-                        Text(group.home)
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                            .foregroundColor(.secondary)
-                            .padding(.top, 4)
-
-                        ForEach(group.cameras) { camera in
-                            HStack(spacing: 8) {
-                                Image(systemName: selectedCameraId == camera.id ? "video.fill" : "video")
-                                    .foregroundColor(selectedCameraId == camera.id ? .accentColor : .secondary)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(camera.displayName)
-                                        .font(.caption)
-                                        .fontWeight(.medium)
-                                        .lineLimit(1)
-                                    Text(camera.roomName?.isEmpty == false ? camera.roomName! : "Unassigned Room")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
-                                }
-                                Spacer(minLength: 0)
-                            }
-                            .padding(8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(selectedCameraId == camera.id ? Color.accentColor.opacity(0.14) : Color.clear)
-                            )
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                selectedCameraId = camera.id
-                            }
-                        }
-                    }
-                }
-            }
+            CameraSelectionTable(cameras: streamableCameras, selectedCameraId: $selectedCameraId)
 
             Divider()
 
@@ -1830,6 +1799,7 @@ struct CameraView: View {
     }
 
     private func selectDefaultCameraIfNeeded() {
+        if selectedCameraId == Constants.previewTestId { return }
         selectedCameraId = CameraSelectionLogic.selectedCameraId(currentId: selectedCameraId, cameras: streamableCameras)
     }
 
@@ -1857,14 +1827,249 @@ struct HeaderAction: View {
     let action: () -> Void
 
     var body: some View {
-        Label(title, systemImage: systemImage)
-            .font(.callout)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle())
-            .onTapGesture(perform: action)
-            .accessibilityAddTraits(.isButton)
+        AppKitActionButton(title: title, systemImage: systemImage, action: action)
+            .frame(height: 34)
+    }
+}
+
+struct AppKitActionButton: NSViewRepresentable {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.performAction))
+        button.bezelStyle = .rounded
+        button.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: title)
+        button.imagePosition = .imageLeading
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.action = action
+        button.title = title
+        button.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: title)
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func performAction() {
+            action()
+        }
+    }
+}
+
+private enum CameraSelectionRow {
+    case previewTest
+    case section(String)
+    case camera(GoogleCamera)
+
+    var isSelectable: Bool {
+        switch self {
+        case .previewTest, .camera:
+            return true
+        case .section:
+            return false
+        }
+    }
+
+    var selectionId: String? {
+        switch self {
+        case .previewTest:
+            return Constants.previewTestId
+        case .camera(let camera):
+            return camera.id
+        case .section:
+            return nil
+        }
+    }
+}
+
+struct CameraSelectionTable: NSViewRepresentable {
+    let cameras: [GoogleCamera]
+    @Binding var selectedCameraId: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selectedCameraId: $selectedCameraId)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let tableView = NSTableView()
+        tableView.headerView = nil
+        tableView.rowHeight = 48
+        tableView.intercellSpacing = NSSize(width: 0, height: 4)
+        tableView.selectionHighlightStyle = .regular
+        tableView.allowsMultipleSelection = false
+        tableView.dataSource = context.coordinator
+        tableView.delegate = context.coordinator
+
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("camera"))
+        column.resizingMask = .autoresizingMask
+        tableView.addTableColumn(column)
+
+        let scrollView = NSScrollView()
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.documentView = tableView
+
+        context.coordinator.tableView = tableView
+        context.coordinator.update(cameras: cameras, selectedCameraId: selectedCameraId)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.update(cameras: cameras, selectedCameraId: selectedCameraId)
+    }
+
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        @Binding private var selectedCameraId: String
+        weak var tableView: NSTableView?
+        private var rows: [CameraSelectionRow] = []
+        private var isProgrammaticSelection = false
+
+        init(selectedCameraId: Binding<String>) {
+            _selectedCameraId = selectedCameraId
+        }
+
+        func update(cameras: [GoogleCamera], selectedCameraId: String) {
+            rows = [.previewTest]
+            for group in CameraSelectionLogic.groupedByHome(cameras) {
+                rows.append(.section(group.home))
+                rows.append(contentsOf: group.cameras.map { .camera($0) })
+            }
+
+            tableView?.reloadData()
+            selectRow(for: selectedCameraId)
+        }
+
+        func numberOfRows(in tableView: NSTableView) -> Int {
+            rows.count
+        }
+
+        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+            rows.indices.contains(row) && rows[row].isSelectable
+        }
+
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard !isProgrammaticSelection,
+                  let tableView,
+                  rows.indices.contains(tableView.selectedRow),
+                  let id = rows[tableView.selectedRow].selectionId else {
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.selectedCameraId = id
+            }
+        }
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard rows.indices.contains(row) else { return nil }
+
+            let identifier = NSUserInterfaceItemIdentifier("CameraSelectionCell")
+            let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? NSTableCellView()
+            cell.identifier = identifier
+            cell.subviews.forEach { $0.removeFromSuperview() }
+
+            let textField = NSTextField(labelWithString: title(for: rows[row]))
+            textField.translatesAutoresizingMaskIntoConstraints = false
+            textField.lineBreakMode = .byTruncatingTail
+            textField.maximumNumberOfLines = 2
+            textField.font = font(for: rows[row])
+            textField.textColor = textColor(for: rows[row])
+            cell.addSubview(textField)
+
+            NSLayoutConstraint.activate([
+                textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+                textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+                textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+
+            return cell
+        }
+
+        private func selectRow(for id: String) {
+            guard let tableView else { return }
+            let row = rows.firstIndex { $0.selectionId == id } ?? rows.firstIndex { $0.selectionId != nil }
+
+            isProgrammaticSelection = true
+            if let row {
+                tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            } else {
+                tableView.deselectAll(nil)
+            }
+            isProgrammaticSelection = false
+        }
+
+        private func title(for row: CameraSelectionRow) -> String {
+            switch row {
+            case .previewTest:
+                return "Video Preview Test\nAVKit HLS stream"
+            case .section(let home):
+                return home
+            case .camera(let camera):
+                let room = camera.roomName?.isEmpty == false ? camera.roomName! : "Unassigned Room"
+                return "\(camera.displayName)\n\(room)"
+            }
+        }
+
+        private func font(for row: CameraSelectionRow) -> NSFont {
+            switch row {
+            case .section:
+                return .systemFont(ofSize: 12, weight: .semibold)
+            default:
+                return .systemFont(ofSize: 13, weight: .regular)
+            }
+        }
+
+        private func textColor(for row: CameraSelectionRow) -> NSColor {
+            switch row {
+            case .section:
+                return .secondaryLabelColor
+            default:
+                return .labelColor
+            }
+        }
+    }
+}
+
+struct TestVideoPreviewTile: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .bottomLeading) {
+                RTSPPlayerView(url: Constants.previewTestURL)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Video Preview Test")
+                        .font(.headline)
+                        .fontWeight(.semibold)
+                    Text("AVKit HLS stream")
+                        .font(.caption)
+                }
+                .foregroundColor(.white)
+                .padding(8)
+                .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 6))
+                .padding(8)
+            }
+            .aspectRatio(16 / 9, contentMode: .fit)
+
+            Text("If this plays, the app can render live video. Nest WebRTC still depends on Google returning a usable SDP answer.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.top, 8)
+        }
     }
 }
 
@@ -2365,7 +2570,7 @@ struct WebRTCPlayerView: NSViewRepresentable {
       </style>
     </head>
     <body>
-      <video id="remoteVideo" autoplay playsinline controls muted></video>
+      <video id="remoteVideo" autoplay playsinline muted></video>
       <script>
         const post = (type, payload = {}) => {
           window.webkit.messageHandlers.native.postMessage({ type, ...payload });
