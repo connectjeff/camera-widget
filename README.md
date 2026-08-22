@@ -73,9 +73,12 @@ cp Config/oauth2.example.json Config/oauth2.local.json
 {
   "clientId": "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
   "clientSecret": "YOUR_GOOGLE_OAUTH_CLIENT_SECRET_IF_REQUIRED",
-  "deviceAccessProjectId": "YOUR_GOOGLE_DEVICE_ACCESS_PROJECT_ID"
+  "deviceAccessProjectId": "YOUR_GOOGLE_DEVICE_ACCESS_PROJECT_ID",
+  "usePKCE": false
 }
 ```
+
+For a Google OAuth Web application client with a client secret, leave `usePKCE` as `false`. Set it to `true` only if you intentionally created a public/native OAuth client that expects PKCE.
 
 You can also use environment variables:
 
@@ -83,6 +86,7 @@ You can also use environment variables:
 export GOOGLE_CLIENT_ID="..."
 export GOOGLE_CLIENT_SECRET="..."
 export GOOGLE_DEVICE_ACCESS_PROJECT_ID="..."
+export GOOGLE_OAUTH_USE_PKCE="false"
 ```
 
 ## Build and Run

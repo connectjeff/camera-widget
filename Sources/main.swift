@@ -22,6 +22,7 @@ struct AppConfig: Decodable {
     let clientId: String?
     let clientSecret: String?
     let deviceAccessProjectId: String?
+    let usePKCE: Bool?
 
     static func load() -> AppConfig {
         let fileManager = FileManager.default
@@ -39,7 +40,7 @@ struct AppConfig: Decodable {
             return config
         }
 
-        return AppConfig(clientId: nil, clientSecret: nil, deviceAccessProjectId: nil)
+        return AppConfig(clientId: nil, clientSecret: nil, deviceAccessProjectId: nil, usePKCE: nil)
     }
 }
 
@@ -49,6 +50,7 @@ struct OAuth2Config {
     static let clientId = ProcessInfo.processInfo.environment["GOOGLE_CLIENT_ID"] ?? fileConfig.clientId ?? ""
     static let clientSecret = ProcessInfo.processInfo.environment["GOOGLE_CLIENT_SECRET"] ?? fileConfig.clientSecret
     static let deviceAccessProjectId = ProcessInfo.processInfo.environment["GOOGLE_DEVICE_ACCESS_PROJECT_ID"] ?? fileConfig.deviceAccessProjectId ?? ""
+    static let usePKCE = ProcessInfo.processInfo.environment["GOOGLE_OAUTH_USE_PKCE"].map { $0 == "1" || $0.lowercased() == "true" } ?? fileConfig.usePKCE ?? false
 
     static var authorizationEndpoint: String {
         "https://nestservices.google.com/partnerconnections/\(deviceAccessProjectId)/auth"
@@ -143,8 +145,11 @@ final class AuthManager: ObservableObject {
             return
         }
 
-        let verifier = Self.makeCodeVerifier()
-        codeVerifier = verifier
+        if OAuth2Config.usePKCE {
+            codeVerifier = Self.makeCodeVerifier()
+        } else {
+            codeVerifier = nil
+        }
 
         callbackServer = OAuthCallbackServer(port: Constants.callbackPort)
         callbackServer?.start { [weak self] result in
@@ -160,16 +165,21 @@ final class AuthManager: ObservableObject {
         }
 
         var components = URLComponents(string: OAuth2Config.authorizationEndpoint)
-        components?.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "redirect_uri", value: Constants.redirectURI),
             URLQueryItem(name: "client_id", value: OAuth2Config.clientId),
             URLQueryItem(name: "access_type", value: "offline"),
             URLQueryItem(name: "prompt", value: "consent"),
             URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "scope", value: Constants.sdmScope),
-            URLQueryItem(name: "code_challenge", value: Self.makeCodeChallenge(from: verifier)),
-            URLQueryItem(name: "code_challenge_method", value: "S256")
+            URLQueryItem(name: "scope", value: Constants.sdmScope)
         ]
+
+        if let codeVerifier {
+            queryItems.append(URLQueryItem(name: "code_challenge", value: Self.makeCodeChallenge(from: codeVerifier)))
+            queryItems.append(URLQueryItem(name: "code_challenge_method", value: "S256"))
+        }
+
+        components?.queryItems = queryItems
 
         guard let url = components?.url else {
             errorMessage = "Failed to build Google Partner Connections Manager URL."
@@ -196,9 +206,12 @@ final class AuthManager: ObservableObject {
             "client_id": OAuth2Config.clientId,
             "code": code,
             "grant_type": "authorization_code",
-            "redirect_uri": Constants.redirectURI,
-            "code_verifier": codeVerifier ?? ""
+            "redirect_uri": Constants.redirectURI
         ]
+
+        if let codeVerifier {
+            params["code_verifier"] = codeVerifier
+        }
 
         if let clientSecret = OAuth2Config.clientSecret, !clientSecret.isEmpty {
             params["client_secret"] = clientSecret
