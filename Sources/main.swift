@@ -517,6 +517,496 @@ final class SnapshotSource {
     weak var view: NSView?
 }
 
+@MainActor
+final class SnapshotScheduler: ObservableObject {
+    static let shared = SnapshotScheduler()
+
+    @Published private(set) var status = "Snapshot scheduler idle"
+
+    private var workers: [String: CameraSnapshotWorker] = [:]
+
+    func start(cameras: [GoogleCamera], authManager: AuthManager) {
+        let cameraIds = Set(cameras.map(\.id))
+
+        for (id, worker) in workers where !cameraIds.contains(id) {
+            worker.stop()
+            workers[id] = nil
+        }
+
+        for (index, camera) in cameras.enumerated() {
+            guard camera.supportsRTSP || camera.supportsWebRTC else { continue }
+
+            if let worker = workers[camera.id] {
+                worker.update(camera: camera)
+            } else {
+                let worker = CameraSnapshotWorker(camera: camera, authManager: authManager)
+                workers[camera.id] = worker
+                worker.start(initialDelay: TimeInterval(index * 5))
+            }
+        }
+
+        status = workers.isEmpty
+            ? "No stream-capable cameras available for widget snapshots"
+            : "Updating \(workers.count) camera widget snapshot\(workers.count == 1 ? "" : "s") every 60 seconds"
+    }
+
+    func stopAll() {
+        workers.values.forEach { $0.stop() }
+        workers.removeAll()
+        status = "Snapshot scheduler stopped"
+    }
+}
+
+@MainActor
+final class CameraSnapshotWorker {
+    private var camera: GoogleCamera
+    private weak var authManager: AuthManager?
+    private var timer: Timer?
+    private var hiddenWindow: NSWindow?
+    private var webRTCSession: HiddenWebRTCSession?
+
+    init(camera: GoogleCamera, authManager: AuthManager) {
+        self.camera = camera
+        self.authManager = authManager
+    }
+
+    func update(camera: GoogleCamera) {
+        self.camera = camera
+    }
+
+    func start(initialDelay: TimeInterval) {
+        stopTimerOnly()
+
+        guard initialDelay > 0 else {
+            capture()
+            timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.capture()
+                }
+            }
+            return
+        }
+
+        Timer.scheduledTimer(withTimeInterval: initialDelay, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.capture()
+                self?.timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                    Task { @MainActor in
+                        self?.capture()
+                    }
+                }
+            }
+        }
+    }
+
+    func stop() {
+        stopTimerOnly()
+        webRTCSession?.stop()
+        webRTCSession = nil
+        hiddenWindow?.close()
+        hiddenWindow = nil
+    }
+
+    private func stopTimerOnly() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func capture() {
+        guard let authManager else { return }
+
+        authManager.validAccessToken { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+
+                switch result {
+                case .success(let accessToken):
+                    if self.camera.supportsWebRTC {
+                        self.captureWebRTC(accessToken: accessToken)
+                    } else if self.camera.supportsRTSP {
+                        self.captureRTSP(accessToken: accessToken)
+                    }
+                case .failure:
+                    break
+                }
+            }
+        }
+    }
+
+    private func captureRTSP(accessToken: String) {
+        executeStreamCommand(
+            command: "sdm.devices.commands.CameraLiveStream.GenerateRtspStream",
+            params: [:],
+            accessToken: accessToken
+        ) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+
+                guard case .success(let data) = result,
+                      let response = try? JSONDecoder().decode(GenerateRTSPStreamResponse.self, from: data),
+                      let urlString = response.results.streamUrls?["rtspUrl"],
+                      let url = URL(string: urlString) else {
+                    return
+                }
+
+                let playerView = AVPlayerView(frame: NSRect(x: 0, y: 0, width: 640, height: 360))
+                playerView.controlsStyle = .none
+                playerView.videoGravity = .resizeAspect
+                playerView.player = AVPlayer(url: url)
+                self.installHidden(view: playerView)
+                playerView.player?.play()
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                    guard let image = playerView.snapshotImage() else { return }
+                    try? SnapshotStore.write(image: image, camera: self.camera)
+                    playerView.player?.pause()
+                }
+            }
+        }
+    }
+
+    private func captureWebRTC(accessToken: String) {
+        webRTCSession?.stop()
+        let session = HiddenWebRTCSession(camera: camera) { [weak self] offerSdp in
+            self?.executeStreamCommand(
+                command: "sdm.devices.commands.CameraLiveStream.GenerateWebRtcStream",
+                params: ["offerSdp": offerSdp],
+                accessToken: accessToken
+            ) { [weak self] result in
+                Task { @MainActor in
+                    guard case .success(let data) = result,
+                          let response = try? JSONDecoder().decode(GenerateWebRTCStreamResponse.self, from: data) else {
+                        return
+                    }
+
+                    self?.webRTCSession?.apply(answerSdp: response.results.answerSdp)
+                }
+            }
+        } onSnapshot: { camera, image in
+            try? SnapshotStore.write(image: image, camera: camera)
+        }
+        webRTCSession = session
+        installHidden(view: session.webView)
+        session.start()
+    }
+
+    private func executeStreamCommand(
+        command: String,
+        params: [String: Any],
+        accessToken: String,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        let urlString = "https://smartdevicemanagement.googleapis.com/v1/\(camera.resourceName):executeCommand"
+        guard let url = URL(string: urlString) else {
+            completion(.failure(NSError(domain: Constants.appName, code: -20)))
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["command": command, "params": params])
+        } catch {
+            completion(.failure(error))
+            return
+        }
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode),
+                  let data else {
+                completion(.failure(NSError(domain: Constants.appName, code: -21)))
+                return
+            }
+
+            completion(.success(data))
+        }.resume()
+    }
+
+    private func installHidden(view: NSView) {
+        let window: NSWindow
+        if let hiddenWindow {
+            window = hiddenWindow
+        } else {
+            window = NSWindow(
+                contentRect: NSRect(x: -2000, y: -2000, width: 640, height: 360),
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            window.alphaValue = 0.01
+            window.ignoresMouseEvents = true
+            window.orderBack(nil)
+            hiddenWindow = window
+        }
+
+        view.frame = NSRect(x: 0, y: 0, width: 640, height: 360)
+        window.contentView = view
+    }
+}
+
+@MainActor
+final class HiddenWebRTCSession: NSObject, WKScriptMessageHandler {
+    let webView: WKWebView
+
+    private let camera: GoogleCamera
+    private let onOffer: (String) -> Void
+    private let onSnapshot: (GoogleCamera, NSImage) -> Void
+    private var appliedAnswerSdp: String?
+    private var capturedForCurrentAnswer = false
+
+    init(camera: GoogleCamera, onOffer: @escaping (String) -> Void, onSnapshot: @escaping (GoogleCamera, NSImage) -> Void) {
+        self.camera = camera
+        self.onOffer = onOffer
+        self.onSnapshot = onSnapshot
+
+        let contentController = WKUserContentController()
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = contentController
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        configuration.allowsAirPlayForMediaPlayback = false
+
+        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 640, height: 360), configuration: configuration)
+        super.init()
+
+        contentController.add(self, name: "native")
+        webView.setValue(false, forKey: "drawsBackground")
+    }
+
+    func start() {
+        capturedForCurrentAnswer = false
+        webView.loadHTMLString(WebRTCPlayerView.html, baseURL: URL(string: "https://localhost"))
+    }
+
+    func apply(answerSdp: String) {
+        guard appliedAnswerSdp != answerSdp else { return }
+        appliedAnswerSdp = answerSdp
+
+        do {
+            let data = try JSONSerialization.data(withJSONObject: answerSdp)
+            guard let encoded = String(data: data, encoding: .utf8) else { return }
+            webView.evaluateJavaScript("window.applyAnswer(\(encoded));")
+        } catch {
+            return
+        }
+    }
+
+    func stop() {
+        webView.evaluateJavaScript("window.stopStream && window.stopStream();")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "native")
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              let type = body["type"] as? String else {
+            return
+        }
+
+        switch type {
+        case "offer":
+            guard let sdp = body["sdp"] as? String else { return }
+            onOffer(sdp)
+        case "status":
+            guard !capturedForCurrentAnswer,
+                  let message = body["message"] as? String,
+                  message.contains("connected") || message.contains("Waiting for media") else {
+                return
+            }
+            capturedForCurrentAnswer = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+                guard let self, let image = self.webView.snapshotImage() else { return }
+                self.onSnapshot(self.camera, image)
+            }
+        default:
+            break
+        }
+    }
+}
+
+@MainActor
+final class LiveFeedCoordinator: ObservableObject {
+    private var models: [String: LiveFeedModel] = [:]
+
+    func model(for camera: GoogleCamera) -> LiveFeedModel {
+        if let model = models[camera.id] {
+            model.update(camera: camera)
+            return model
+        }
+
+        let model = LiveFeedModel(camera: camera)
+        models[camera.id] = model
+        return model
+    }
+}
+
+@MainActor
+final class LiveFeedModel: ObservableObject {
+    @Published var rtspURL: URL?
+    @Published var webRTCAnswerSdp: String?
+    @Published var status: String?
+    @Published var errorMessage: String?
+
+    private(set) var camera: GoogleCamera
+    private var isStarted = false
+
+    init(camera: GoogleCamera) {
+        self.camera = camera
+    }
+
+    func update(camera: GoogleCamera) {
+        self.camera = camera
+    }
+
+    func start(authManager: AuthManager) {
+        guard !isStarted else { return }
+        isStarted = true
+        errorMessage = nil
+
+        if camera.supportsRTSP {
+            status = "Starting RTSP..."
+            authManager.validAccessToken { [weak self] result in
+                Task { @MainActor in
+                    guard let self else { return }
+                    switch result {
+                    case .success(let accessToken):
+                        self.generateRTSP(accessToken: accessToken)
+                    case .failure(let error):
+                        self.status = nil
+                        self.errorMessage = "Authentication failed: \(error.localizedDescription)"
+                    }
+                }
+            }
+        } else if camera.supportsWebRTC {
+            status = "Starting WebRTC..."
+        } else {
+            status = nil
+            errorMessage = "No supported stream protocol."
+        }
+    }
+
+    func generateWebRTC(offerSdp: String, authManager: AuthManager) {
+        guard camera.supportsWebRTC else { return }
+        status = "Requesting WebRTC answer..."
+        errorMessage = nil
+
+        authManager.validAccessToken { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                switch result {
+                case .success(let accessToken):
+                    self.executeCommand(
+                        command: "sdm.devices.commands.CameraLiveStream.GenerateWebRtcStream",
+                        params: ["offerSdp": offerSdp],
+                        accessToken: accessToken
+                    ) { [weak self] result in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            switch result {
+                            case .success(let data):
+                                do {
+                                    let response = try JSONDecoder().decode(GenerateWebRTCStreamResponse.self, from: data)
+                                    self.webRTCAnswerSdp = response.results.answerSdp
+                                    self.status = "Applying WebRTC answer..."
+                                } catch {
+                                    self.status = nil
+                                    self.errorMessage = "Failed to parse WebRTC response: \(error.localizedDescription)"
+                                }
+                            case .failure(let error):
+                                self.status = nil
+                                self.errorMessage = "WebRTC command failed: \(error.localizedDescription)"
+                            }
+                        }
+                    }
+                case .failure(let error):
+                    self.status = nil
+                    self.errorMessage = "Authentication failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func generateRTSP(accessToken: String) {
+        executeCommand(
+            command: "sdm.devices.commands.CameraLiveStream.GenerateRtspStream",
+            params: [:],
+            accessToken: accessToken
+        ) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                switch result {
+                case .success(let data):
+                    do {
+                        let response = try JSONDecoder().decode(GenerateRTSPStreamResponse.self, from: data)
+                        guard let urlString = response.results.streamUrls?["rtspUrl"],
+                              let url = URL(string: urlString) else {
+                            self.status = nil
+                            self.errorMessage = "RTSP command succeeded, but no stream URL was returned."
+                            return
+                        }
+                        self.rtspURL = url
+                        self.status = nil
+                    } catch {
+                        self.status = nil
+                        self.errorMessage = "Failed to parse RTSP response: \(error.localizedDescription)"
+                    }
+                case .failure(let error):
+                    self.status = nil
+                    self.errorMessage = "RTSP command failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func executeCommand(
+        command: String,
+        params: [String: Any],
+        accessToken: String,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        let urlString = "https://smartdevicemanagement.googleapis.com/v1/\(camera.resourceName):executeCommand"
+        guard let url = URL(string: urlString) else {
+            completion(.failure(NSError(domain: Constants.appName, code: -30)))
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["command": command, "params": params])
+        } catch {
+            completion(.failure(error))
+            return
+        }
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode),
+                  let data else {
+                completion(.failure(NSError(domain: Constants.appName, code: -31)))
+                return
+            }
+
+            completion(.success(data))
+        }.resume()
+    }
+}
+
 enum JSONValue: Decodable {
     case string(String)
     case number(Double)
@@ -588,7 +1078,7 @@ final class CameraManager: ObservableObject {
             Task { @MainActor in
                 switch result {
                 case .success(let accessToken):
-                    self?.fetchCameras(with: accessToken)
+                    self?.fetchCameras(with: accessToken, authManager: authManager)
                 case .failure(let error):
                     self?.isLoading = false
                     self?.errorMessage = "Authentication failed: \(error.localizedDescription)"
@@ -665,10 +1155,11 @@ final class CameraManager: ObservableObject {
         streamExpiresAt = nil
     }
 
-    private func fetchCameras(with accessToken: String) {
+    private func fetchCameras(with accessToken: String, authManager: AuthManager) {
         fetchStructures(with: accessToken) { [weak self] structuresByName in
             Task { @MainActor in
-                self?.fetchDevices(with: accessToken, structuresByName: structuresByName)
+                guard let self else { return }
+                self.fetchDevices(with: accessToken, structuresByName: structuresByName, authManager: authManager)
             }
         }
     }
@@ -699,7 +1190,7 @@ final class CameraManager: ObservableObject {
         }.resume()
     }
 
-    private func fetchDevices(with accessToken: String, structuresByName: [String: String]) {
+    private func fetchDevices(with accessToken: String, structuresByName: [String: String], authManager: AuthManager) {
         let urlString = "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/devices"
         guard let url = URL(string: urlString) else {
             isLoading = false
@@ -750,6 +1241,7 @@ final class CameraManager: ObservableObject {
                     }
 
                     try? SnapshotStore.writeCatalog(cameras: self.cameras)
+                    SnapshotScheduler.shared.start(cameras: self.cameras, authManager: authManager)
                     self.isLoading = false
                 } catch {
                     self.isLoading = false
@@ -952,8 +1444,10 @@ final class CameraManager: ObservableObject {
 struct CameraView: View {
     @StateObject private var authManager = AuthManager()
     @StateObject private var cameraManager = CameraManager()
+    @StateObject private var liveFeedCoordinator = LiveFeedCoordinator()
+    @ObservedObject private var snapshotScheduler = SnapshotScheduler.shared
     @AppStorage("widgetMode") private var widgetMode = false
-    @State private var snapshotTimer: Timer?
+    @State private var zoomedCamera: GoogleCamera?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -966,27 +1460,22 @@ struct CameraView: View {
                 authenticationView
             } else if cameraManager.cameras.isEmpty {
                 emptyCameraView
-            } else if let camera = cameraManager.selectedCamera {
-                cameraDetailView(for: camera)
+            } else {
+                cameraWallView
             }
         }
-        .frame(minWidth: widgetMode ? 380 : 620, minHeight: widgetMode ? 300 : 420)
+        .frame(minWidth: widgetMode ? 520 : 900, minHeight: widgetMode ? 360 : 640)
         .background(WindowConfigurator(widgetMode: widgetMode))
         .onAppear {
             if authManager.isAuthenticated {
                 cameraManager.loadCameras(authManager: authManager)
             }
-            startSnapshotTimer()
-        }
-        .onDisappear {
-            snapshotTimer?.invalidate()
-            snapshotTimer = nil
         }
     }
 
     private var header: some View {
         HStack {
-            Label("Nest Camera Tester", systemImage: "video")
+            Label("Nest Camera Viewer", systemImage: "video")
                 .font(.headline)
             Spacer()
             if authManager.isAuthenticated {
@@ -1002,6 +1491,7 @@ struct CameraView: View {
                 }
 
                 Button {
+                    SnapshotScheduler.shared.stopAll()
                     authManager.signOut()
                 } label: {
                     Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
@@ -1066,94 +1556,96 @@ struct CameraView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func cameraDetailView(for camera: GoogleCamera) -> some View {
+    private var cameraWallView: some View {
         VStack(spacing: 0) {
-            HStack {
-                Picker("Camera", selection: Binding(
-                    get: { cameraManager.selectedCamera },
-                    set: { newValue in
-                        if let newValue {
-                            cameraManager.selectCamera(newValue)
-                        }
-                    }
-                )) {
-                    ForEach(cameraManager.cameras) { camera in
-                        Text(camera.fullDisplayName).tag(camera as GoogleCamera?)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                Spacer()
-
-                Label(camera.isOnline ? "Online" : "Offline", systemImage: camera.isOnline ? "checkmark.circle" : "exclamationmark.triangle")
-                    .foregroundColor(camera.isOnline ? .green : .orange)
+            if let zoomedCamera {
+                zoomedFeedView(for: zoomedCamera)
+            } else {
+                allFeedsGridView
             }
-            .padding()
 
-            VStack(spacing: 16) {
-                ZStack {
-                    Color.black
-                    if let rtspURL = cameraManager.rtspURL {
-                        RTSPPlayerView(url: rtspURL)
-                    } else if camera.supportsWebRTC {
-                        WebRTCPlayerView(answerSdp: cameraManager.webRTCAnswerSdp) { offerSdp in
-                            cameraManager.generateWebRTCStream(authManager: authManager, offerSdp: offerSdp)
-                        } onStatus: { status in
-                            cameraManager.webRTCStatus = status
-                        } onError: { message in
-                            cameraManager.errorMessage = message
+            Divider()
+            HStack {
+                Text(snapshotScheduler.status)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text("\(cameraManager.cameras.count) camera\(cameraManager.cameras.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var allFeedsGridView: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 12)], spacing: 12) {
+                ForEach(groupedCameras, id: \.home) { group in
+                    Section {
+                        ForEach(group.cameras) { camera in
+                            CameraFeedTile(
+                                camera: camera,
+                                model: liveFeedCoordinator.model(for: camera),
+                                authManager: authManager,
+                                isZoomed: false
+                            )
+                            .onTapGesture {
+                                zoomedCamera = camera
+                            }
                         }
-                    } else {
-                        VStack(spacing: 12) {
-                            Image(systemName: "video")
-                                .font(.system(size: 52))
-                            Text(camera.displayName)
-                                .font(.title2)
-                                .fontWeight(.semibold)
-                            Text(camera.locationLabel)
-                                .font(.callout)
-                                .foregroundColor(.secondary)
-                            Text(protocolSummary(for: camera))
-                                .font(.callout)
-                                .foregroundColor(.secondary)
+                    } header: {
+                        HStack {
+                            Text(group.home)
+                                .font(.headline)
+                            Spacer()
                         }
-                        .foregroundColor(.white)
-                    }
-                }
-                .aspectRatio(16 / 9, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                if let expiresAt = cameraManager.streamExpiresAt {
-                    Text("Stream token expires at \(expiresAt)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                if let status = cameraManager.webRTCStatus {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                errorText
-
-                HStack {
-                    if camera.supportsRTSP {
-                        Button {
-                            cameraManager.generateRTSPStream(authManager: authManager)
-                        } label: {
-                            Label("Start RTSP Stream", systemImage: "play.fill")
-                        }
-                    }
-
-                    if camera.supportsWebRTC {
-                        Label("WebRTC starts automatically", systemImage: "dot.radiowaves.left.and.right")
-                            .foregroundColor(.secondary)
+                        .padding(.top, 4)
                     }
                 }
             }
             .padding()
         }
+    }
+
+    private func zoomedFeedView(for camera: GoogleCamera) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button {
+                    zoomedCamera = nil
+                } label: {
+                    Label("All Feeds", systemImage: "square.grid.2x2")
+                }
+
+                VStack(alignment: .leading) {
+                    Text(camera.displayName)
+                        .font(.headline)
+                    Text(camera.locationLabel)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+            }
+            .padding()
+
+            CameraFeedTile(
+                camera: camera,
+                model: liveFeedCoordinator.model(for: camera),
+                authManager: authManager,
+                isZoomed: true
+            )
+            .padding()
+        }
+    }
+
+    private var groupedCameras: [(home: String, cameras: [GoogleCamera])] {
+        Dictionary(grouping: cameraManager.cameras, by: \.homeName)
+            .map { home, cameras in
+                (home, cameras.sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending })
+            }
+            .sorted { $0.home.localizedCaseInsensitiveCompare($1.home) == .orderedAscending }
     }
 
     @ViewBuilder
@@ -1172,31 +1664,113 @@ struct CameraView: View {
             ? "No stream protocols reported by SDM."
             : "Protocols: \(camera.supportedProtocols.joined(separator: ", "))"
     }
+}
 
-    private func startSnapshotTimer() {
-        guard snapshotTimer == nil else { return }
+struct CameraFeedTile: View {
+    let camera: GoogleCamera
+    @ObservedObject var model: LiveFeedModel
+    let authManager: AuthManager
+    let isZoomed: Bool
 
-        captureSnapshotForWidget()
-        snapshotTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
-            Task { @MainActor in
-                captureSnapshotForWidget()
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Color.black
+
+                if let rtspURL = model.rtspURL {
+                    RTSPPlayerView(url: rtspURL)
+                } else if camera.supportsWebRTC {
+                    WebRTCPlayerView(answerSdp: model.webRTCAnswerSdp) { offerSdp in
+                        model.generateWebRTC(offerSdp: offerSdp, authManager: authManager)
+                    } onStatus: { status in
+                        model.status = status
+                    } onError: { message in
+                        model.errorMessage = message
+                    }
+                } else {
+                    unavailableView
+                }
+
+                VStack {
+                    Spacer()
+                    metadataBar
+                }
+            }
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            if isZoomed {
+                detailStatus
+                    .padding(.top, 8)
+            }
+        }
+        .contentShape(Rectangle())
+        .onAppear {
+            model.start(authManager: authManager)
+        }
+    }
+
+    private var metadataBar: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(camera.displayName)
+                    .font(isZoomed ? .headline : .caption)
+                    .fontWeight(.semibold)
+                    .lineLimit(1)
+                Text(camera.locationLabel)
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Label(camera.isOnline ? "Online" : "Offline", systemImage: camera.isOnline ? "checkmark.circle" : "exclamationmark.triangle")
+                .font(.caption2)
+                .labelStyle(.iconOnly)
+                .foregroundColor(camera.isOnline ? .green : .orange)
+        }
+        .foregroundColor(.white)
+        .padding(8)
+        .background(.black.opacity(0.58))
+    }
+
+    private var unavailableView: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "video.slash")
+                .font(.title)
+            Text("No supported stream protocol")
+                .font(.caption)
+        }
+        .foregroundColor(.white.opacity(0.75))
+    }
+
+    @ViewBuilder
+    private var detailStatus: some View {
+        VStack(spacing: 4) {
+            Text(protocolSummary)
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            if let status = model.status {
+                Text(status)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            if let error = model.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
             }
         }
     }
 
-    private func captureSnapshotForWidget() {
-        guard authManager.isAuthenticated,
-              let camera = cameraManager.selectedCamera,
-              let image = SnapshotSource.shared.view?.snapshotImage() ?? NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil })?.contentView?.snapshotImage() else {
-            return
-        }
-
-        do {
-            try SnapshotStore.write(image: image, camera: camera)
-            cameraManager.webRTCStatus = "Widget snapshot updated at \(Date().formatted(date: .omitted, time: .shortened))"
-        } catch {
-            cameraManager.errorMessage = "Failed to write widget snapshot: \(error.localizedDescription)"
-        }
+    private var protocolSummary: String {
+        camera.supportedProtocols.isEmpty
+            ? "No stream protocols reported by SDM."
+            : "Protocols: \(camera.supportedProtocols.joined(separator: ", "))"
     }
 }
 
@@ -1380,7 +1954,7 @@ struct WebRTCPlayerView: NSViewRepresentable {
         }
     }
 
-    private static let html = """
+    static let html = """
     <!doctype html>
     <html>
     <head>

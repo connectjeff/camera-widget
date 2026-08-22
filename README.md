@@ -7,19 +7,21 @@ The design goal is a macOS widget that can show Google Nest camera video. This r
 - A companion floating camera viewer app for credentialed live-stream testing and always-on desktop viewing.
 - A real WidgetKit widget target that remains the primary widget experience to build next.
 
-The current SwiftUI app is the companion viewer and live-stream harness. It supports Google OAuth through Partner Connections Manager, stores tokens in macOS Keychain, lists authorized SDM cameras, requests RTSP streams for cameras that report RTSP support, and attempts WebRTC playback for cameras that report WebRTC support. It includes a compact floating mode for desktop viewing while the WidgetKit target is built out.
+The current SwiftUI app is the companion viewer and live-stream harness. It supports Google OAuth through Partner Connections Manager, stores tokens in macOS Keychain, lists authorized SDM cameras across homes, shows all available camera feeds in one interface, lets you click a feed to zoom into a single camera, and lets you return to the all-feed wall. It requests RTSP streams for cameras that report RTSP support and attempts WebRTC playback for cameras that report WebRTC support. It includes a compact floating mode for desktop viewing.
 
 ## Status
 
 - Google Partner Connections Manager OAuth: implemented
 - SDM camera discovery: implemented
+- Multi-home, multi-camera feed wall: implemented
+- Click-to-zoom single feed view: implemented
 - RTSP stream command: implemented
 - RTSP playback attempt with AVKit: implemented
 - WebRTC stream command and embedded playback attempt with WebKit: implemented
 - Compact floating companion-viewer mode: implemented
 - WidgetKit snapshot widget with per-widget camera configuration: implemented
 - Per-camera snapshot files for widget instances: implemented
-- Companion app snapshot capture every 60 seconds for the currently viewed camera: implemented
+- Independent stream snapshot scheduler every 60 seconds per discovered camera: implemented
 - Packaged macOS `.app`: local build script support
 - Distributed signed/notarized release: not implemented
 - Continuous in-widget live video feasibility work: pending
@@ -114,9 +116,9 @@ open ~/Applications/GoogleHomeCameraWidget.app
 4. Click **Sign In with Google**.
 5. Complete Google's Partner Connections Manager flow and grant camera access.
 6. Verify the app lists real cameras.
-7. Select a camera.
-8. If it reports `RTSP`, click **Start RTSP Stream**.
-9. If it reports `WEB_RTC`, the embedded WebRTC view starts automatically and requests the stream from Google.
+7. Watch the all-feed wall grouped by home.
+8. Click a feed to zoom into one camera.
+9. Click **All Feeds** to return to the camera wall.
 10. Toggle **Widget Mode** to keep the companion viewer as a compact floating camera window on the desktop while validating the live-stream path.
 11. Add the **Nest Camera Snapshot** widget from macOS widget editing.
 12. Edit the widget and choose the camera for that widget instance. You can add one widget per camera.
@@ -133,7 +135,9 @@ The implemented first widget architecture is:
 - While running, the main app writes a camera catalog plus per-camera snapshot files to `~/Library/Application Support/GoogleHomeCameraWidget/`.
 - The WidgetKit extension exposes a Camera configuration parameter populated from the discovered camera catalog.
 - Each widget instance displays the latest saved snapshot and timestamp for its selected camera.
-- The companion app captures a new snapshot every 60 seconds for the camera currently open in the live viewer.
+- The companion app starts an independent hidden snapshot worker for each discovered stream-capable camera.
+- Each worker negotiates its own RTSP or WebRTC stream, captures a snapshot, writes that camera's snapshot file, and repeats on a 60-second cadence while the companion app is running.
+- The visible all-feed viewer is independent from the widget snapshot scheduler; changing zoom state in the app does not choose or limit which widget camera snapshots update.
 - The WidgetKit extension requests a timeline refresh after 60 seconds. macOS may throttle this because WidgetKit refreshes are system-managed and budgeted.
 - Continuous in-widget WebRTC/RTSP playback still needs feasibility testing against macOS WidgetKit behavior.
 

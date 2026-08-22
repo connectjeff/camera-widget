@@ -9,10 +9,12 @@ Status:
 - Google OAuth through Partner Connections Manager.
 - Tokens stored in macOS Keychain.
 - Device Access camera discovery.
+- Multi-home, multi-camera feed wall.
+- Click-to-zoom single camera view with return to all feeds.
 - RTSP stream request and AVKit playback attempt.
 - WebRTC stream request and embedded WebKit playback attempt.
 - Compact floating window mode.
-- Writes per-camera live-view snapshots and metadata every 60 seconds for the camera currently open in the viewer.
+- Runs independent per-camera hidden snapshot workers every 60 seconds for discovered stream-capable cameras.
 - Local `.app` installer through `build.sh --install`.
 
 Remaining:
@@ -20,6 +22,8 @@ Remaining:
 - Validate RTSP and WebRTC behavior against real Google Nest cameras.
 - Add clearer per-camera diagnostics after the first live-device test.
 - Add stream stop/cleanup commands for RTSP sessions.
+- Add throttling controls if Google API quotas are hit with many simultaneous cameras.
+- Add user controls for pausing/resuming the visible camera wall separately from widget snapshots.
 - Add signed/notarized release packaging if the app will be shared outside local development.
 
 ## Track 2: WidgetKit Camera Widget
