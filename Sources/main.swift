@@ -1120,6 +1120,7 @@ final class CameraManager: ObservableObject {
     @Published var streamExpiresAt: String?
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published var discoverySummary: String?
 
     @AppStorage("selectedCameraId") private var storedSelection: String?
 
@@ -1129,6 +1130,7 @@ final class CameraManager: ObservableObject {
         rtspURL = nil
         webRTCAnswerSdp = nil
         webRTCStatus = nil
+        discoverySummary = nil
 
         guard !OAuth2Config.deviceAccessProjectId.isEmpty else {
             isLoading = false
@@ -1221,28 +1223,13 @@ final class CameraManager: ObservableObject {
         fetchStructures(with: accessToken) { [weak self] structuresByName in
             Task { @MainActor in
                 guard let self else { return }
-                self.fetchDevices(with: accessToken, structuresByName: structuresByName, authManager: authManager, pageToken: nil, accumulatedDevices: [])
+                self.fetchDevices(with: accessToken, structuresByName: structuresByName, authManager: authManager)
             }
         }
     }
 
     private func fetchStructures(with accessToken: String, completion: @escaping ([String: String]) -> Void) {
-        fetchStructuresPage(with: accessToken, pageToken: nil, accumulatedStructures: [], completion: completion)
-    }
-
-    private func fetchStructuresPage(
-        with accessToken: String,
-        pageToken: String?,
-        accumulatedStructures: [SDMStructure],
-        completion: @escaping ([String: String]) -> Void
-    ) {
-        var components = URLComponents(string: "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/structures")
-        components?.queryItems = [URLQueryItem(name: "pageSize", value: "100")]
-        if let pageToken, !pageToken.isEmpty {
-            components?.queryItems?.append(URLQueryItem(name: "pageToken", value: pageToken))
-        }
-
-        guard let url = components?.url else {
+        guard let url = URL(string: "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/structures") else {
             completion([:])
             return
         }
@@ -1259,21 +1246,7 @@ final class CameraManager: ObservableObject {
                 return
             }
 
-            let allStructures = accumulatedStructures + root.structures
-
-            if let nextPageToken = root.nextPageToken, !nextPageToken.isEmpty {
-                Task { @MainActor in
-                    self.fetchStructuresPage(
-                        with: accessToken,
-                        pageToken: nextPageToken,
-                        accumulatedStructures: allStructures,
-                        completion: completion
-                    )
-                }
-                return
-            }
-
-            let structures = Dictionary(uniqueKeysWithValues: allStructures.map { structure in
+            let structures = Dictionary(uniqueKeysWithValues: root.structures.map { structure in
                 (structure.name, Self.structureDisplayName(from: structure))
             })
             completion(structures)
@@ -1283,17 +1256,9 @@ final class CameraManager: ObservableObject {
     private func fetchDevices(
         with accessToken: String,
         structuresByName: [String: String],
-        authManager: AuthManager,
-        pageToken: String?,
-        accumulatedDevices: [SDMDevice]
+        authManager: AuthManager
     ) {
-        var components = URLComponents(string: "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/devices")
-        components?.queryItems = [URLQueryItem(name: "pageSize", value: "100")]
-        if let pageToken, !pageToken.isEmpty {
-            components?.queryItems?.append(URLQueryItem(name: "pageToken", value: pageToken))
-        }
-
-        guard let url = components?.url else {
+        guard let url = URL(string: "https://smartdevicemanagement.googleapis.com/v1/enterprises/\(OAuth2Config.deviceAccessProjectId)/devices") else {
             isLoading = false
             errorMessage = "Invalid Device Access API URL."
             return
@@ -1326,22 +1291,10 @@ final class CameraManager: ObservableObject {
 
                 do {
                     let root = try JSONDecoder().decode(SDMDeviceResponse.self, from: data)
-                    let allDevices = accumulatedDevices + root.devices
-
-                    if let nextPageToken = root.nextPageToken, !nextPageToken.isEmpty {
-                        self.fetchDevices(
-                            with: accessToken,
-                            structuresByName: structuresByName,
-                            authManager: authManager,
-                            pageToken: nextPageToken,
-                            accumulatedDevices: allDevices
-                        )
-                        return
-                    }
-
-                    self.cameras = allDevices
+                    self.cameras = root.devices
                         .compactMap { Self.camera(from: $0, structuresByName: structuresByName) }
                         .sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending }
+                    self.discoverySummary = "SDM returned \(root.devices.count) device\(root.devices.count == 1 ? "" : "s"); \(self.cameras.count) include camera live-stream support."
 
                     if let storedId = self.storedSelection,
                        let camera = self.cameras.first(where: { $0.id == storedId }) {
@@ -1701,7 +1654,7 @@ struct CameraView: View {
 
             Divider()
             HStack {
-                Text("\(visibleCameras.count) of \(cameraManager.cameras.count) camera\(cameraManager.cameras.count == 1 ? "" : "s") shown")
+                Text(cameraManager.discoverySummary ?? "\(visibleCameras.count) of \(cameraManager.cameras.count) camera\(cameraManager.cameras.count == 1 ? "" : "s") shown")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
