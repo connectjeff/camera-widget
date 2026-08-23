@@ -146,6 +146,21 @@ enum CameraSelectionLogic {
     }
 }
 
+enum CameraDeepLink {
+    static let scheme = "googlehomecamerawidget"
+
+    static func cameraId(from url: URL) -> String? {
+        guard url.scheme?.lowercased() == scheme,
+              url.host?.lowercased() == "camera",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let cameraId = components.queryItems?.first(where: { $0.name == "id" })?.value,
+              !cameraId.isEmpty else {
+            return nil
+        }
+        return cameraId
+    }
+}
+
 struct AuthToken: Codable {
     let accessToken: String
     let refreshToken: String?
@@ -1754,6 +1769,14 @@ struct CameraView: View {
                 cameraManager.loadCameras(authManager: authManager)
             }
         }
+        .onOpenURL { url in
+            guard let cameraId = CameraDeepLink.cameraId(from: url) else { return }
+            selectedCameraId = cameraId
+            liveFeedCoordinator.reset()
+            if authManager.isAuthenticated && cameraManager.cameras.isEmpty {
+                cameraManager.loadCameras(authManager: authManager)
+            }
+        }
     }
 
     private var header: some View {
@@ -3194,6 +3217,17 @@ enum IntegrationSmokeTests {
         let groups = CameraSelectionLogic.groupedByHome(streamable)
         guard groups.count == 1, groups[0].cameras.count == 2 else {
             fputs("Unexpected grouped camera shape: \(groups)\n", stderr)
+            return 1
+        }
+
+        var components = URLComponents()
+        components.scheme = CameraDeepLink.scheme
+        components.host = "camera"
+        components.queryItems = [URLQueryItem(name: "id", value: streamable[1].id)]
+        guard let deepLink = components.url,
+              CameraDeepLink.cameraId(from: deepLink) == streamable[1].id,
+              CameraDeepLink.cameraId(from: URL(string: "https://example.com/camera?id=wrong")!) == nil else {
+            fputs("Camera widget deep-link parsing failed.\n", stderr)
             return 1
         }
 

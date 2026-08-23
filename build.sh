@@ -6,7 +6,7 @@ EXTENSION_NAME="GoogleHomeCameraWidgetExtension"
 BUNDLE_NAME="${APP_NAME}.app"
 BUNDLE_ID="com.jeffalderson.google-home-camera-widget"
 EXTENSION_BUNDLE_ID="${BUNDLE_ID}.snapshot-widget"
-VERSION="0.1.0"
+VERSION="0.1.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 APP_DIR="${BUILD_DIR}/${BUNDLE_NAME}"
@@ -50,9 +50,10 @@ install_local_config() {
 build_installer_package() {
     local package_root="${BUILD_DIR}/pkg-root"
     local package_scripts="${BUILD_DIR}/pkg-scripts"
+    local component_plist="${BUILD_DIR}/pkg-components.plist"
     local package_path="${BUILD_DIR}/${APP_NAME}-${VERSION}.pkg"
 
-    rm -rf "${package_root}" "${package_scripts}" "${package_path}"
+    rm -rf "${package_root}" "${package_scripts}" "${component_plist}" "${package_path}"
     mkdir -p "${package_root}/Applications" "${package_scripts}"
     COPYFILE_DISABLE=1 ditto --norsrc "${APP_DIR}" "${package_root}/Applications/${BUNDLE_NAME}"
     xattr -cr "${package_root}" >/dev/null 2>&1 || true
@@ -82,8 +83,14 @@ exit 0
 SCRIPT
     chmod 755 "${package_scripts}/postinstall"
 
+    pkgbuild --analyze --root "${package_root}" "${component_plist}"
+    /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "${component_plist}"
+    /usr/libexec/PlistBuddy -c "Set :0:BundleIsVersionChecked true" "${component_plist}"
+    /usr/libexec/PlistBuddy -c "Set :0:BundleOverwriteAction upgrade" "${component_plist}"
+
     COPYFILE_DISABLE=1 pkgbuild \
         --root "${package_root}" \
+        --component-plist "${component_plist}" \
         --scripts "${package_scripts}" \
         --identifier "${BUNDLE_ID}.installer" \
         --version "${VERSION}" \

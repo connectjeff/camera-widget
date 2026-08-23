@@ -1,11 +1,24 @@
 import AppIntents
 import CryptoKit
+import Darwin
+import OSLog
 import SwiftUI
 import WidgetKit
 
 private enum SnapshotStore {
+    private static let logger = Logger(subsystem: "com.jeffalderson.google-home-camera-widget.snapshot-widget", category: "SnapshotStore")
+
+    // Widget extensions get a containerized Foundation home directory. The app
+    // deliberately publishes snapshots in the signed-in user's real home.
+    static var userHomeDirectory: URL {
+        guard let passwordEntry = getpwuid(getuid()) else {
+            return FileManager.default.homeDirectoryForCurrentUser
+        }
+        return URL(fileURLWithPath: String(cString: passwordEntry.pointee.pw_dir), isDirectory: true)
+    }
+
     static var directory: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        userHomeDirectory
             .appendingPathComponent("Library/Application Support/GoogleHomeCameraWidget", isDirectory: true)
     }
 
@@ -22,11 +35,24 @@ private enum SnapshotStore {
     }
 
     static func catalog() -> [CameraCatalogEntry] {
-        guard let data = try? Data(contentsOf: catalogURL),
-              let catalog = try? JSONDecoder().decode([CameraCatalogEntry].self, from: data) else {
+        do {
+            let data = try Data(contentsOf: catalogURL)
+            let catalog = try JSONDecoder().decode([CameraCatalogEntry].self, from: data)
+            logger.info("Loaded \(catalog.count, privacy: .public) cameras from the shared catalog")
+            return catalog.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        } catch {
+            logger.error("Unable to load camera catalog at \(catalogURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return []
         }
-        return catalog.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    static func viewerURL(cameraId: String?) -> URL? {
+        guard let cameraId else { return nil }
+        var components = URLComponents()
+        components.scheme = "googlehomecamerawidget"
+        components.host = "camera"
+        components.queryItems = [URLQueryItem(name: "id", value: cameraId)]
+        return components.url
     }
 
     static func load(cameraId: String?) -> CameraSnapshot {
@@ -204,6 +230,7 @@ private struct CameraSnapshotWidgetView: View {
             .padding(8)
         }
         .containerBackground(.black, for: .widget)
+        .widgetURL(SnapshotStore.viewerURL(cameraId: entry.configuration.camera?.id))
     }
 
     private var emptyMessage: String {

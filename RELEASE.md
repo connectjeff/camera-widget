@@ -2,14 +2,13 @@
 
 This project ships local development builds and installer packages.
 
-## Local Development Install
+## Local Development Build
 
 ```bash
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./build.sh --install
-open ~/Applications/GoogleHomeCameraWidget.app
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./build.sh
 ```
 
-This builds the real Xcode app and WidgetKit extension targets, installs into `~/Applications`, copies ignored local OAuth config into the user's Application Support directory, and verifies LaunchServices/PlugInKit registration for the widget extension.
+This builds the real Xcode app and WidgetKit extension targets in `build/`. Use the installer package for desktop-widget testing: macOS App Intents services may reject extension discovery from a per-user `~/Applications` location.
 
 ## Installer Package
 
@@ -20,7 +19,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./build.sh --pkg
 The package is written to:
 
 ```text
-build/GoogleHomeCameraWidget-0.1.0.pkg
+build/GoogleHomeCameraWidget-0.1.1.pkg
 ```
 
 It installs `GoogleHomeCameraWidget.app` into `/Applications` and runs a postinstall script that registers the app and embedded WidgetKit extension.
@@ -48,4 +47,4 @@ To publish a GitHub release with the `.pkg` attached:
 scripts/release.sh --publish
 ```
 
-The publish mode creates and pushes an annotated `v0.1.0` tag if it does not already exist, then creates a GitHub release with the installer package attached.
+The publish mode reads the current version from `build.sh`, creates and pushes its annotated tag if needed, then creates a GitHub release with the installer package attached.

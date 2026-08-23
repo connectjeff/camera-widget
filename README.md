@@ -147,7 +147,7 @@ To build a macOS installer package that installs the app into `/Applications` an
 
 ```bash
 ./build.sh --pkg
-sudo installer -pkg build/GoogleHomeCameraWidget-0.1.0.pkg -target /
+sudo installer -pkg build/GoogleHomeCameraWidget-0.1.1.pkg -target /
 open /Applications/GoogleHomeCameraWidget.app
 ```
 
@@ -158,7 +158,7 @@ See [RELEASE.md](RELEASE.md) for package verification and GitHub release publish
 ## First Run
 
 1. Confirm `Config/oauth2.local.json` exists and has your client ID and Device Access project ID.
-2. Run `./build.sh --install` for local development, or install `build/GoogleHomeCameraWidget-0.1.0.pkg` for the system `/Applications` install that registers the desktop widget.
+2. Run `./build.sh --install` for local development, or install `build/GoogleHomeCameraWidget-0.1.1.pkg` for the system `/Applications` install that registers the desktop widget.
 3. Open `~/Applications/GoogleHomeCameraWidget.app` or `/Applications/GoogleHomeCameraWidget.app`.
 4. Click **Sign In with Google**.
 5. Complete Google's Partner Connections Manager flow and grant camera access.
