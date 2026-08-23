@@ -626,6 +626,7 @@ final class SnapshotScheduler: ObservableObject {
     private weak var authManager: AuthManager?
     private var cycleStartedAt = Date()
     private var nextCameraIndex = 0
+    private var currentCameraRetryCount = 0
     private var scheduledCapture: Task<Void, Never>?
     private var generation = 0
 
@@ -665,6 +666,7 @@ final class SnapshotScheduler: ObservableObject {
         cameras = []
         authManager = nil
         nextCameraIndex = 0
+        currentCameraRetryCount = 0
         status = "Snapshot scheduler stopped"
     }
 
@@ -673,6 +675,7 @@ final class SnapshotScheduler: ObservableObject {
         scheduledCapture?.cancel()
         scheduledCapture = nil
         nextCameraIndex = 0
+        currentCameraRetryCount = 0
         cycleStartedAt = Date()
         scheduleNext(after: 0, generation: generation)
     }
@@ -708,6 +711,14 @@ final class SnapshotScheduler: ObservableObject {
                 guard let self, generation == self.generation else { return }
                 if let image {
                     try? SnapshotStore.write(image: image, camera: camera)
+                    self.currentCameraRetryCount = 0
+                } else if self.currentCameraRetryCount < 2 {
+                    self.currentCameraRetryCount += 1
+                    self.status = "Waiting for \(camera.displayName) to deliver its first frame"
+                    self.scheduleNext(after: 2, generation: generation)
+                    return
+                } else {
+                    self.currentCameraRetryCount = 0
                 }
 
                 self.nextCameraIndex += 1
@@ -1806,8 +1817,8 @@ struct CameraView: View {
         }
         .onOpenURL { url in
             guard let cameraId = CameraDeepLink.cameraId(from: url) else { return }
-            selectedCameraId = cameraId
             liveFeedCoordinator.reset()
+            selectedCameraId = cameraId
             if authManager.isAuthenticated && cameraManager.cameras.isEmpty {
                 cameraManager.loadCameras(authManager: authManager)
             }
@@ -1913,9 +1924,6 @@ struct CameraView: View {
         .onAppear(perform: selectDefaultCameraIfNeeded)
         .onChange(of: cameraManager.cameras) {
             selectDefaultCameraIfNeeded()
-        }
-        .onChange(of: selectedCameraId) {
-            liveFeedCoordinator.reset()
         }
     }
 
@@ -4007,9 +4015,7 @@ struct GoogleHomeCameraWidgetApp: App {
             exit(VideoPreviewSmokeTest.run())
         }
         if Self.isCredentialedSmokeTest {
-            DispatchQueue.main.async {
-                exit(CredentialedNestSmokeTest.run())
-            }
+            exit(CredentialedNestSmokeTest.run())
         }
     }
 
