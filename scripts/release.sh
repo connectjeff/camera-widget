@@ -6,6 +6,8 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_SCRIPT="${REPO_DIR}/build.sh"
 VERSION="$(grep '^VERSION=' "${BUILD_SCRIPT}" | head -1 | cut -d'"' -f2)"
 PACKAGE_PATH="${REPO_DIR}/build/GoogleHomeCameraWidget-${VERSION}.pkg"
+CHECKSUM_PATH="${PACKAGE_PATH}.sha256"
+RELEASE_NOTES_PATH="${REPO_DIR}/RELEASE_NOTES.md"
 PUBLISH=0
 
 for arg in "$@"; do
@@ -41,17 +43,20 @@ test -x "${PACKAGE_CHECK_DIR}/expanded/Scripts/preinstall"
 test -x "${PACKAGE_CHECK_DIR}/expanded/Scripts/postinstall"
 grep -q 'brew.*install ffmpeg' "${PACKAGE_CHECK_DIR}/expanded/Scripts/preinstall"
 grep -q 'go2rtc-patched' "${PACKAGE_CHECK_DIR}/expanded/Scripts/postinstall"
+shasum -a 256 "${PACKAGE_PATH}" > "${CHECKSUM_PATH}"
 
 echo "Release package ready: ${PACKAGE_PATH}"
+echo "Release checksum ready: ${CHECKSUM_PATH}"
 
 if [[ "${PUBLISH}" -eq 1 ]]; then
+    test -f "${RELEASE_NOTES_PATH}"
     tag="v${VERSION}"
     if ! git rev-parse "${tag}" >/dev/null 2>&1; then
         git tag -a "${tag}" -m "Release ${tag}"
         git push origin "${tag}"
     fi
 
-    gh release create "${tag}" "${PACKAGE_PATH}" \
+    gh release create "${tag}" "${PACKAGE_PATH}" "${CHECKSUM_PATH}" \
         --title "Google Home Camera Widget ${tag}" \
-        --notes "macOS installer package. Installs the app into /Applications and registers the embedded WidgetKit extension."
+        --notes-file "${RELEASE_NOTES_PATH}"
 fi

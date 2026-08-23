@@ -50,3 +50,4 @@ scripts/release.sh --publish
 ```
 
 The publish mode reads the current version from `build.sh`, creates and pushes its annotated tag if needed, then creates a GitHub release with the installer package attached.
+It also generates and attaches a SHA-256 checksum and uses the tracked `RELEASE_NOTES.md` as the GitHub release notes.
