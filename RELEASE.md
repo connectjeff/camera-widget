@@ -19,10 +19,12 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./build.sh --pkg
 The package is written to:
 
 ```text
-build/GoogleHomeCameraWidget-0.1.1.pkg
+build/GoogleHomeCameraWidget-0.1.2.pkg
 ```
 
 It installs `GoogleHomeCameraWidget.app` into `/Applications` and runs a postinstall script that registers the app and embedded WidgetKit extension.
+
+The package preinstall script verifies macOS 26, Apple Silicon, and FFmpeg. When FFmpeg is absent and Homebrew is present, it installs the `ffmpeg` formula as the signed-in user. It fails with an actionable message when Homebrew is unavailable rather than silently bootstrapping a package manager.
 
 The package contains Xcode-generated App Intents metadata required for the standard **Edit Widget** camera picker. The current local package is ad-hoc signed and is intended for this Mac. A public release should use a Developer ID signature, notarization, and a provisioned App Group.
 

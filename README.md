@@ -33,14 +33,22 @@ The broadcast bridge lets you select any discovered camera and open a clean 16:9
 - Distributed signed/notarized release: not implemented
 - Continuous in-widget live video feasibility work: pending
 
-## Requirements
+## Runtime Requirements
 
 - macOS 26 or newer
-- Xcode 26 or newer (the WidgetKit extension requires Xcode-generated App Intents metadata)
+- Apple Silicon Mac (the current app and bundled go2rtc helper are arm64)
+- Homebrew for installer-managed media dependencies
+- FFmpeg for live preview frames and widget snapshots; the package installs the Homebrew formula automatically when Homebrew is present
 - A consumer Google Account that manages compatible Nest cameras
 - Google Device Access registration and a Device Access project
 - A Google Cloud OAuth client associated with that Device Access project
 - Smart Device Management API enabled in Google Cloud
+
+## Build Requirements
+
+- Xcode 26 or newer, including the macOS 26 SDK
+- Swift 5 toolchain supplied by Xcode
+- Internet access when rebuilding the patched go2rtc helper or installing FFmpeg
 
 See [THIRD_PARTY.md](THIRD_PARTY.md) for required Google access, scopes, redirect URI, and software dependencies.
 
@@ -136,30 +144,25 @@ To build a local `.app` bundle:
 open build/GoogleHomeCameraWidget.app
 ```
 
-To install the local bundle into your user Applications folder:
-
-```bash
-./build.sh --install
-open ~/Applications/GoogleHomeCameraWidget.app
-```
-
 To build a macOS installer package that installs the app into `/Applications` and registers the embedded WidgetKit extension with LaunchServices/PlugInKit:
 
 ```bash
 ./build.sh --pkg
-sudo installer -pkg build/GoogleHomeCameraWidget-0.1.1.pkg -target /
+sudo installer -pkg build/GoogleHomeCameraWidget-0.1.2.pkg -target /
 open /Applications/GoogleHomeCameraWidget.app
 ```
 
-The installer package does not include `Config/oauth2.local.json` or OAuth tokens. Keep local credentials in `~/Library/Application Support/GoogleHomeCameraWidget/oauth2.json`, which `./build.sh --install` can populate from your ignored local config during development.
+The installer checks the macOS version, CPU architecture, embedded go2rtc helper, and FFmpeg. If FFmpeg is missing and Homebrew is available, it runs `brew install ffmpeg` as the signed-in user. If Homebrew itself is absent, the installer stops with a clear message instead of downloading and executing a package manager without separate user consent.
+
+The installer package does not include `Config/oauth2.local.json` or OAuth tokens. Keep local credentials in `~/Library/Application Support/GoogleHomeCameraWidget/oauth2.json` with permissions limited to your user account.
 
 See [RELEASE.md](RELEASE.md) for package verification and GitHub release publishing.
 
 ## First Run
 
 1. Confirm `Config/oauth2.local.json` exists and has your client ID and Device Access project ID.
-2. Run `./build.sh --install` for local development, or install `build/GoogleHomeCameraWidget-0.1.1.pkg` for the system `/Applications` install that registers the desktop widget.
-3. Open `~/Applications/GoogleHomeCameraWidget.app` or `/Applications/GoogleHomeCameraWidget.app`.
+2. Install `build/GoogleHomeCameraWidget-0.1.2.pkg` for the system `/Applications` install that registers the desktop widget.
+3. Open `/Applications/GoogleHomeCameraWidget.app`.
 4. Click **Sign In with Google**.
 5. Complete Google's Partner Connections Manager flow and grant camera access.
 6. Verify the app lists real cameras.

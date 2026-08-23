@@ -640,8 +640,15 @@ final class SnapshotScheduler: ObservableObject {
             scheduledCapture = nil
             Go2RTCBridgeManager.shared.stop()
         } else if cameraIdsChanged {
-            try? Go2RTCBridgeManager.shared.configure(cameras: streamable, authManager: authManager)
-            restartCycle()
+            do {
+                try Go2RTCBridgeManager.shared.configure(cameras: streamable, authManager: authManager)
+                restartCycle()
+            } catch {
+                scheduledCapture?.cancel()
+                scheduledCapture = nil
+                status = "Widget snapshots unavailable: \(error.localizedDescription)"
+                return
+            }
         } else if scheduledCapture == nil {
             restartCycle()
         }
@@ -947,11 +954,20 @@ final class Go2RTCBridgeManager {
             )
         }
 
+        guard let ffmpegURL = ffmpegBinaryURL() else {
+            throw NSError(
+                domain: Constants.appName,
+                code: -113,
+                userInfo: [NSLocalizedDescriptionKey: "FFmpeg is required for camera preview frames and widget snapshots. Install it with Homebrew: brew install ffmpeg"]
+            )
+        }
+
         let configURL = try writeConfig(
             cameras: cameras,
             clientId: OAuth2Config.clientId,
             clientSecret: clientSecret,
-            refreshToken: refreshToken
+            refreshToken: refreshToken,
+            ffmpegURL: ffmpegURL
         )
 
         let bridgeProcess = Process()
@@ -977,7 +993,8 @@ final class Go2RTCBridgeManager {
         cameras: [GoogleCamera],
         clientId: String,
         clientSecret: String,
-        refreshToken: String
+        refreshToken: String,
+        ffmpegURL: URL
     ) throws -> URL {
         let directory = SnapshotStore.directory.appendingPathComponent("go2rtc", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -995,6 +1012,8 @@ final class Go2RTCBridgeManager {
         let yaml = """
         api:
           listen: "127.0.0.1:11984"
+        ffmpeg:
+          bin: \(yamlSingleQuoted(ffmpegURL.path))
         rtsp:
           listen: ""
         webrtc:
@@ -1065,6 +1084,22 @@ final class Go2RTCBridgeManager {
             URL(fileURLWithPath: fileManager.currentDirectoryPath).appendingPathComponent("build/tools/go2rtc-patched"),
             URL(fileURLWithPath: fileManager.currentDirectoryPath).appendingPathComponent("build/tools/go2rtc/go2rtc")
         ].compactMap { $0 }
+
+        return candidates.first { fileManager.isExecutableFile(atPath: $0.path) }
+    }
+
+    private func ffmpegBinaryURL() -> URL? {
+        let fileManager = FileManager.default
+        let environmentPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let pathCandidates = environmentPath
+            .split(separator: ":")
+            .map { URL(fileURLWithPath: String($0), isDirectory: true).appendingPathComponent("ffmpeg") }
+        let candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent("Tools/ffmpeg"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg"),
+            URL(fileURLWithPath: "/usr/local/bin/ffmpeg"),
+            URL(fileURLWithPath: "/usr/bin/ffmpeg")
+        ].compactMap { $0 } + pathCandidates
 
         return candidates.first { fileManager.isExecutableFile(atPath: $0.path) }
     }

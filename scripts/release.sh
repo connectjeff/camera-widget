@@ -34,6 +34,14 @@ DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" "${
 pkgutil --payload-files "${PACKAGE_PATH}" | grep -q './Applications/GoogleHomeCameraWidget.app$'
 pkgutil --payload-files "${PACKAGE_PATH}" | grep -q './Applications/GoogleHomeCameraWidget.app/Contents/PlugIns/GoogleHomeCameraWidgetExtension.appex$'
 
+PACKAGE_CHECK_DIR="$(mktemp -d)"
+trap 'rm -rf "${PACKAGE_CHECK_DIR}"' EXIT
+pkgutil --expand "${PACKAGE_PATH}" "${PACKAGE_CHECK_DIR}/expanded"
+test -x "${PACKAGE_CHECK_DIR}/expanded/Scripts/preinstall"
+test -x "${PACKAGE_CHECK_DIR}/expanded/Scripts/postinstall"
+grep -q 'brew.*install ffmpeg' "${PACKAGE_CHECK_DIR}/expanded/Scripts/preinstall"
+grep -q 'go2rtc-patched' "${PACKAGE_CHECK_DIR}/expanded/Scripts/postinstall"
+
 echo "Release package ready: ${PACKAGE_PATH}"
 
 if [[ "${PUBLISH}" -eq 1 ]]; then

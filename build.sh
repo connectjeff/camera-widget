@@ -6,46 +6,13 @@ EXTENSION_NAME="GoogleHomeCameraWidgetExtension"
 BUNDLE_NAME="${APP_NAME}.app"
 BUNDLE_ID="com.jeffalderson.google-home-camera-widget"
 EXTENSION_BUNDLE_ID="${BUNDLE_ID}.snapshot-widget"
-VERSION="0.1.1"
+VERSION="0.1.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 APP_DIR="${BUILD_DIR}/${BUNDLE_NAME}"
 EXTENSION_DIR="${APP_DIR}/Contents/PlugIns/${EXTENSION_NAME}.appex"
 XCODE_PROJECT="${SCRIPT_DIR}/CameraWidget.xcodeproj"
 DERIVED_DATA="${BUILD_DIR}/DerivedData"
-
-register_app() {
-    local installed_app="$1"
-    local installed_extension="${installed_app}/Contents/PlugIns/${EXTENSION_NAME}.appex"
-    local lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-
-    if [[ -x "${lsregister}" ]]; then
-        "${lsregister}" -f "${installed_app}" >/dev/null 2>&1 || true
-    fi
-
-    if command -v pluginkit >/dev/null 2>&1 && [[ -d "${installed_extension}" ]]; then
-        pluginkit -a "${installed_extension}" >/dev/null 2>&1 || true
-        pluginkit -e use -i "${EXTENSION_BUNDLE_ID}" >/dev/null 2>&1 || true
-    fi
-
-    killall WidgetKitExtensionHost >/dev/null 2>&1 || true
-
-    local registration
-    registration="$(pluginkit -m -A -D -v -i "${EXTENSION_BUNDLE_ID}" 2>&1 || true)"
-    if [[ "${registration}" != *"${EXTENSION_BUNDLE_ID}"* ]]; then
-        echo "Widget extension registration failed for ${installed_extension}" >&2
-        echo "${registration}" >&2
-        return 1
-    fi
-}
-
-install_local_config() {
-    if [[ -f "${SCRIPT_DIR}/Config/oauth2.local.json" ]]; then
-        mkdir -p "${HOME}/Library/Application Support/${APP_NAME}"
-        cp "${SCRIPT_DIR}/Config/oauth2.local.json" "${HOME}/Library/Application Support/${APP_NAME}/oauth2.json"
-        chmod 600 "${HOME}/Library/Application Support/${APP_NAME}/oauth2.json"
-    fi
-}
 
 build_installer_package() {
     local package_root="${BUILD_DIR}/pkg-root"
@@ -58,15 +25,86 @@ build_installer_package() {
     COPYFILE_DISABLE=1 ditto --norsrc "${APP_DIR}" "${package_root}/Applications/${BUNDLE_NAME}"
     xattr -cr "${package_root}" >/dev/null 2>&1 || true
 
+    cat > "${package_scripts}/preinstall" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(/usr/bin/uname -m)" != "arm64" ]]; then
+    echo "Google Home Camera Widget currently requires an Apple Silicon Mac." >&2
+    exit 1
+fi
+
+os_major="$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f1)"
+if [[ "${os_major}" -lt 26 ]]; then
+    echo "Google Home Camera Widget requires macOS 26 or newer." >&2
+    exit 1
+fi
+
+for candidate in /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg /usr/bin/ffmpeg; do
+    if [[ -x "${candidate}" ]] && "${candidate}" -version >/dev/null 2>&1; then
+        exit 0
+    fi
+done
+
+console_user="$(/usr/bin/stat -f '%Su' /dev/console)"
+if [[ "${console_user}" == "root" || "${console_user}" == "loginwindow" ]]; then
+    echo "FFmpeg is missing and no signed-in user is available for dependency installation." >&2
+    exit 1
+fi
+
+brew=""
+for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [[ -x "${candidate}" ]]; then
+        brew="${candidate}"
+        break
+    fi
+done
+
+if [[ -z "${brew}" ]]; then
+    echo "FFmpeg is missing. Install Homebrew from https://brew.sh, then run this installer again; it will install FFmpeg automatically." >&2
+    exit 1
+fi
+
+echo "Installing required FFmpeg dependency with Homebrew..."
+/usr/bin/sudo -H -u "${console_user}" /usr/bin/env \
+    HOMEBREW_NO_AUTO_UPDATE=1 \
+    HOMEBREW_NO_ANALYTICS=1 \
+    "${brew}" install ffmpeg
+
+if ! "${brew}" --prefix ffmpeg >/dev/null 2>&1 || ! "${brew}" --prefix ffmpeg | /usr/bin/xargs -I{} test -x "{}/bin/ffmpeg"; then
+    echo "Homebrew completed without providing an executable FFmpeg binary." >&2
+    exit 1
+fi
+SCRIPT
+    chmod 755 "${package_scripts}/preinstall"
+
     cat > "${package_scripts}/postinstall" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 
 APP_PATH="/Applications/${BUNDLE_NAME}"
 EXTENSION_PATH="\${APP_PATH}/Contents/PlugIns/${EXTENSION_NAME}.appex"
+BRIDGE_PATH="\${APP_PATH}/Contents/Resources/Tools/go2rtc-patched"
 EXTENSION_BUNDLE_ID="${EXTENSION_BUNDLE_ID}"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 CONSOLE_USER="\$(/usr/bin/stat -f '%Su' /dev/console)"
+
+if [[ ! -x "\${BRIDGE_PATH}" ]]; then
+    echo "The packaged go2rtc bridge is missing or not executable." >&2
+    exit 1
+fi
+
+FFMPEG_PATH=""
+for candidate in /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg /usr/bin/ffmpeg; do
+    if [[ -x "\${candidate}" ]] && "\${candidate}" -version >/dev/null 2>&1; then
+        FFMPEG_PATH="\${candidate}"
+        break
+    fi
+done
+if [[ -z "\${FFMPEG_PATH}" ]]; then
+    echo "The required FFmpeg dependency is not installed." >&2
+    exit 1
+fi
 
 if [[ "\${CONSOLE_USER}" != "root" && "\${CONSOLE_USER}" != "loginwindow" ]]; then
     CONSOLE_UID="\$(/usr/bin/id -u "\${CONSOLE_USER}")"
@@ -130,12 +168,8 @@ fi
 codesign --verify --deep --strict "${APP_DIR}"
 
 if [[ "${1:-}" == "--install" ]]; then
-    mkdir -p "${HOME}/Applications"
-    rm -rf "${HOME}/Applications/${BUNDLE_NAME}"
-    cp -R "${APP_DIR}" "${HOME}/Applications/${BUNDLE_NAME}"
-    install_local_config
-    register_app "${HOME}/Applications/${BUNDLE_NAME}"
-    echo "Installed ${HOME}/Applications/${BUNDLE_NAME}"
+    echo "The per-user install mode has been removed because duplicate bundle registrations break WidgetKit. Build --pkg and install the package into /Applications instead." >&2
+    exit 2
 elif [[ "${1:-}" == "--pkg" ]]; then
     build_installer_package
 else

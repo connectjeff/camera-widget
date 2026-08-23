@@ -1,11 +1,20 @@
 # Third-Party Software and Access
 
-This repository is MIT licensed and currently contains only first-party Swift source code.
+This repository is MIT licensed. It integrates with the third-party software and services listed below.
+
+## Media Software
+
+- [go2rtc](https://github.com/AlexxIT/go2rtc) `1.9.14+dev.c245815.dirty` provides the local Nest WebRTC bridge. An arm64 helper built from commit `c245815` with local Nest fixes is embedded in the app and distributed under go2rtc's MIT license.
+- [FFmpeg](https://ffmpeg.org/) converts H.264 camera frames to JPEG/MJPEG for the viewer and WidgetKit snapshots. FFmpeg is not copied into the app package. The installer checks for it and runs the Homebrew `ffmpeg` formula installation when necessary. FFmpeg has its own LGPL/GPL licensing terms based on the formula's enabled components.
+- [Homebrew](https://brew.sh/) is used by the installer to provision FFmpeg when it is missing. Homebrew is not bundled. The installer does not bootstrap Homebrew itself; installing a package manager is a separate system-level choice that requires explicit user action.
+
+The runtime also uses macOS system libraries and frameworks supplied by Apple. It has no Swift Package Manager, npm, Python, or separately downloaded runtime-library dependencies.
 
 ## Apple Software
 
 - macOS 26 or newer is required to run the app.
-- Xcode or Apple Command Line Tools are required to build it locally.
+- Xcode 26, its macOS 26 SDK, and its Swift toolchain are required only to build it locally; they are not runtime dependencies of the installer package.
+- The current packaged binaries target Apple Silicon (`arm64`).
 - The app uses Apple frameworks supplied with macOS/Xcode: SwiftUI, WidgetKit, AVKit, CryptoKit, Network, WebKit, Foundation, AppKit, and Security.
 - Native virtual-camera output for Teams/Zoom camera menus requires Apple's Core Media I/O Camera Extension and System Extensions capabilities, plus signing entitlements from an Apple Developer account.
 
