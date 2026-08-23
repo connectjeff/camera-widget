@@ -1,4 +1,4 @@
-# Google Home Camera Widget 0.1.3
+# 0.1.3
 
 This is the first packaged development release of Google Home Camera Widget for macOS 26 on Apple Silicon.
 

@@ -50,13 +50,13 @@ echo "Release checksum ready: ${CHECKSUM_PATH}"
 
 if [[ "${PUBLISH}" -eq 1 ]]; then
     test -f "${RELEASE_NOTES_PATH}"
-    tag="v${VERSION}"
+    tag="${VERSION}"
     if ! git rev-parse "${tag}" >/dev/null 2>&1; then
         git tag -a "${tag}" -m "Release ${tag}"
         git push origin "${tag}"
     fi
 
     gh release create "${tag}" "${PACKAGE_PATH}" "${CHECKSUM_PATH}" \
-        --title "Google Home Camera Widget ${tag}" \
+        --title "${VERSION}" \
         --notes-file "${RELEASE_NOTES_PATH}"
 fi
