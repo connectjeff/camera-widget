@@ -11,9 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 APP_DIR="${BUILD_DIR}/${BUNDLE_NAME}"
 EXTENSION_DIR="${APP_DIR}/Contents/PlugIns/${EXTENSION_NAME}.appex"
-EXECUTABLE_PATH="${SCRIPT_DIR}/.build/release/${APP_NAME}"
-EXTENSION_EXECUTABLE_PATH="${SCRIPT_DIR}/.build/release/${EXTENSION_NAME}"
-APP_ICON_CATALOG="${SCRIPT_DIR}/Assets/AppIcon.xcassets"
+XCODE_PROJECT="${SCRIPT_DIR}/CameraWidget.xcodeproj"
+DERIVED_DATA="${BUILD_DIR}/DerivedData"
 
 register_app() {
     local installed_app="$1"
@@ -30,6 +29,14 @@ register_app() {
     fi
 
     killall WidgetKitExtensionHost >/dev/null 2>&1 || true
+
+    local registration
+    registration="$(pluginkit -m -A -D -v -i "${EXTENSION_BUNDLE_ID}" 2>&1 || true)"
+    if [[ "${registration}" != *"${EXTENSION_BUNDLE_ID}"* ]]; then
+        echo "Widget extension registration failed for ${installed_extension}" >&2
+        echo "${registration}" >&2
+        return 1
+    fi
 }
 
 install_local_config() {
@@ -58,17 +65,19 @@ APP_PATH="/Applications/${BUNDLE_NAME}"
 EXTENSION_PATH="\${APP_PATH}/Contents/PlugIns/${EXTENSION_NAME}.appex"
 EXTENSION_BUNDLE_ID="${EXTENSION_BUNDLE_ID}"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+CONSOLE_USER="\$(/usr/bin/stat -f '%Su' /dev/console)"
 
-if [[ -x "\${LSREGISTER}" ]]; then
-    "\${LSREGISTER}" -f "\${APP_PATH}" >/dev/null 2>&1 || true
+if [[ "\${CONSOLE_USER}" != "root" && "\${CONSOLE_USER}" != "loginwindow" ]]; then
+    CONSOLE_UID="\$(/usr/bin/id -u "\${CONSOLE_USER}")"
+    if [[ -x "\${LSREGISTER}" ]]; then
+        /bin/launchctl asuser "\${CONSOLE_UID}" /usr/bin/sudo -u "\${CONSOLE_USER}" "\${LSREGISTER}" -f "\${APP_PATH}" >/dev/null 2>&1 || true
+    fi
+    if [[ -d "\${EXTENSION_PATH}" ]]; then
+        /bin/launchctl asuser "\${CONSOLE_UID}" /usr/bin/sudo -u "\${CONSOLE_USER}" /usr/bin/pluginkit -a "\${EXTENSION_PATH}" >/dev/null 2>&1 || true
+        /bin/launchctl asuser "\${CONSOLE_UID}" /usr/bin/sudo -u "\${CONSOLE_USER}" /usr/bin/pluginkit -e use -i "\${EXTENSION_BUNDLE_ID}" >/dev/null 2>&1 || true
+    fi
+    /bin/launchctl asuser "\${CONSOLE_UID}" /usr/bin/sudo -u "\${CONSOLE_USER}" /usr/bin/killall WidgetKitExtensionHost >/dev/null 2>&1 || true
 fi
-
-if [[ -d "\${EXTENSION_PATH}" ]]; then
-    /usr/bin/pluginkit -a "\${EXTENSION_PATH}" >/dev/null 2>&1 || true
-    /usr/bin/pluginkit -e use -i "\${EXTENSION_BUNDLE_ID}" >/dev/null 2>&1 || true
-fi
-
-/usr/bin/killall WidgetKitExtensionHost >/dev/null 2>&1 || true
 exit 0
 SCRIPT
     chmod 755 "${package_scripts}/postinstall"
@@ -86,95 +95,32 @@ SCRIPT
 
 cd "${SCRIPT_DIR}"
 
-swift build -c release
+XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+if [[ ! -x "${XCODE_DEVELOPER_DIR}/usr/bin/xcodebuild" ]]; then
+    echo "Xcode is required to build the WidgetKit extension and App Intents metadata." >&2
+    exit 1
+fi
 
+DEVELOPER_DIR="${XCODE_DEVELOPER_DIR}" "${XCODE_DEVELOPER_DIR}/usr/bin/xcodebuild" \
+    -quiet \
+    -project "${XCODE_PROJECT}" \
+    -scheme "${APP_NAME}" \
+    -configuration Release \
+    -derivedDataPath "${DERIVED_DATA}" \
+    CODE_SIGN_IDENTITY=- \
+    CODE_SIGN_STYLE=Manual \
+    build
+
+XCODE_APP="${DERIVED_DATA}/Build/Products/Release/${BUNDLE_NAME}"
 rm -rf "${APP_DIR}"
-mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources" "${EXTENSION_DIR}/Contents/MacOS"
-cp "${EXECUTABLE_PATH}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
-cp "${EXTENSION_EXECUTABLE_PATH}" "${EXTENSION_DIR}/Contents/MacOS/${EXTENSION_NAME}"
+COPYFILE_DISABLE=1 ditto --norsrc "${XCODE_APP}" "${APP_DIR}"
 
-if [[ -x "${BUILD_DIR}/tools/go2rtc-patched" ]]; then
-    mkdir -p "${APP_DIR}/Contents/Resources/Tools"
-    cp "${BUILD_DIR}/tools/go2rtc-patched" "${APP_DIR}/Contents/Resources/Tools/go2rtc-patched"
-    chmod 755 "${APP_DIR}/Contents/Resources/Tools/go2rtc-patched"
+if [[ ! -f "${EXTENSION_DIR}/Contents/Resources/Metadata.appintents/extract.actionsdata" ]]; then
+    echo "Widget App Intents metadata is missing from ${EXTENSION_DIR}" >&2
+    exit 1
 fi
 
-if command -v xcrun >/dev/null 2>&1 && xcrun -f actool >/dev/null 2>&1; then
-    xcrun actool "${APP_ICON_CATALOG}" \
-        --compile "${APP_DIR}/Contents/Resources" \
-        --platform macosx \
-        --minimum-deployment-target 26.0 \
-        --app-icon AppIcon \
-        --output-partial-info-plist "${BUILD_DIR}/assetcatalog-info.plist" >/dev/null
-else
-    echo "Skipping AppIcon asset catalog compilation because actool is unavailable in the active developer tools."
-fi
-
-cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>${APP_NAME}</string>
-    <key>CFBundleIdentifier</key>
-    <string>${BUNDLE_ID}</string>
-    <key>CFBundleName</key>
-    <string>Google Home Camera Widget</string>
-    <key>CFBundleDisplayName</key>
-    <string>Google Home Camera Widget</string>
-    <key>CFBundleIconName</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${VERSION}</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>26.0</string>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.utilities</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-PLIST
-
-cat > "${EXTENSION_DIR}/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>${EXTENSION_NAME}</string>
-    <key>CFBundleIdentifier</key>
-    <string>${EXTENSION_BUNDLE_ID}</string>
-    <key>CFBundleName</key>
-    <string>Nest Camera Snapshot Widget</string>
-    <key>CFBundleDisplayName</key>
-    <string>Nest Camera Snapshot</string>
-    <key>CFBundlePackageType</key>
-    <string>XPC!</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${VERSION}</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>26.0</string>
-    <key>NSExtension</key>
-    <dict>
-        <key>NSExtensionPointIdentifier</key>
-        <string>com.apple.widgetkit-extension</string>
-    </dict>
-</dict>
-</plist>
-PLIST
-
-if command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign - "${EXTENSION_DIR}" >/dev/null 2>&1 || true
-    codesign --force --sign - "${APP_DIR}" >/dev/null 2>&1 || true
-fi
+codesign --verify --deep --strict "${APP_DIR}"
 
 if [[ "${1:-}" == "--install" ]]; then
     mkdir -p "${HOME}/Applications"

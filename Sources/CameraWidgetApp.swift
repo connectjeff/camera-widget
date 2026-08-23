@@ -19,7 +19,6 @@ private enum Constants {
     static let infoTrait = "sdm.devices.traits.Info"
     static let structureInfoTrait = "sdm.structures.traits.Info"
     static let mockMode = ProcessInfo.processInfo.environment["CAMERA_WIDGET_USE_MOCK_CAMERAS"] == "1"
-    static let backgroundSnapshotsEnabled = ProcessInfo.processInfo.environment["CAMERA_WIDGET_ENABLE_BACKGROUND_SNAPSHOTS"] == "1"
     static let previewTestId = "__video_preview_test__"
     static let previewTestURL = URL(string: "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/gear4/prog_index.m3u8")!
 }
@@ -608,96 +607,96 @@ final class SnapshotScheduler: ObservableObject {
 
     @Published private(set) var status = "Snapshot scheduler idle"
 
-    private var workers: [String: CameraSnapshotWorker] = [:]
+    private var cameras: [GoogleCamera] = []
+    private weak var authManager: AuthManager?
+    private var cycleStartedAt = Date()
+    private var nextCameraIndex = 0
+    private var scheduledCapture: Task<Void, Never>?
+    private var generation = 0
 
     func start(cameras: [GoogleCamera], authManager: AuthManager) {
-        let cameraIds = Set(cameras.map(\.id))
+        let streamable = cameras.filter { $0.supportsRTSP || $0.supportsWebRTC }
+        let cameraIdsChanged = self.cameras.map(\.id) != streamable.map(\.id)
+        self.cameras = streamable
+        self.authManager = authManager
 
-        for (id, worker) in workers where !cameraIds.contains(id) {
-            worker.stop()
-            workers[id] = nil
+        if streamable.isEmpty {
+            scheduledCapture?.cancel()
+            scheduledCapture = nil
+            Go2RTCBridgeManager.shared.stop()
+        } else if cameraIdsChanged {
+            try? Go2RTCBridgeManager.shared.configure(cameras: streamable, authManager: authManager)
+            restartCycle()
+        } else if scheduledCapture == nil {
+            restartCycle()
         }
 
-        for (index, camera) in cameras.enumerated() {
-            guard camera.supportsRTSP || camera.supportsWebRTC else { continue }
-
-            if let worker = workers[camera.id] {
-                worker.update(camera: camera)
-            } else {
-                let worker = CameraSnapshotWorker(camera: camera, authManager: authManager)
-                workers[camera.id] = worker
-                worker.start(initialDelay: TimeInterval(index * 5))
-            }
-        }
-
-        status = workers.isEmpty
+        status = streamable.isEmpty
             ? "No stream-capable cameras available for widget snapshots"
-            : "Updating \(workers.count) camera widget snapshot\(workers.count == 1 ? "" : "s") every 60 seconds"
+            : "Refreshing \(streamable.count) camera widget snapshot\(streamable.count == 1 ? "" : "s")"
     }
 
     func stopAll() {
-        workers.values.forEach { $0.stop() }
-        workers.removeAll()
+        generation += 1
+        scheduledCapture?.cancel()
+        scheduledCapture = nil
+        cameras = []
+        authManager = nil
+        nextCameraIndex = 0
         status = "Snapshot scheduler stopped"
     }
-}
 
-@MainActor
-final class CameraSnapshotWorker {
-    private var camera: GoogleCamera
-    private weak var authManager: AuthManager?
-    private var timer: Timer?
-
-    init(camera: GoogleCamera, authManager: AuthManager) {
-        self.camera = camera
-        self.authManager = authManager
+    private func restartCycle() {
+        generation += 1
+        scheduledCapture?.cancel()
+        scheduledCapture = nil
+        nextCameraIndex = 0
+        cycleStartedAt = Date()
+        scheduleNext(after: 0, generation: generation)
     }
 
-    func update(camera: GoogleCamera) {
-        self.camera = camera
-    }
-
-    func start(initialDelay: TimeInterval) {
-        stopTimerOnly()
-
-        guard initialDelay > 0 else {
-            capture()
-            timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-                Task { @MainActor in
-                    self?.capture()
-                }
+    private func scheduleNext(after delay: TimeInterval, generation: Int) {
+        guard !cameras.isEmpty else { return }
+        scheduledCapture?.cancel()
+        scheduledCapture = Task { [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
             }
+            guard !Task.isCancelled else { return }
+            self?.captureNext(generation: generation)
+        }
+    }
+
+    private func captureNext(generation: Int) {
+        guard generation == self.generation,
+              cameras.indices.contains(nextCameraIndex),
+              let authManager else {
             return
         }
 
-        Timer.scheduledTimer(withTimeInterval: initialDelay, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                self?.capture()
-                self?.timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-                    Task { @MainActor in
-                        self?.capture()
-                    }
-                }
-            }
+        scheduledCapture = nil
+        if nextCameraIndex == 0 {
+            cycleStartedAt = Date()
         }
-    }
-
-    func stop() {
-        stopTimerOnly()
-    }
-
-    private func stopTimerOnly() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    private func capture() {
-        guard let authManager else { return }
+        let camera = cameras[nextCameraIndex]
+        status = "Refreshing \(camera.displayName) for widgets"
 
         Go2RTCBridgeManager.shared.captureFrame(for: camera, authManager: authManager) { [weak self] image in
             Task { @MainActor in
-                guard let self, let image else { return }
-                try? SnapshotStore.write(image: image, camera: self.camera)
+                guard let self, generation == self.generation else { return }
+                if let image {
+                    try? SnapshotStore.write(image: image, camera: camera)
+                }
+
+                self.nextCameraIndex += 1
+                if self.nextCameraIndex >= self.cameras.count {
+                    self.nextCameraIndex = 0
+                    let remaining = max(5, 60 - Date().timeIntervalSince(self.cycleStartedAt))
+                    self.status = "Widget snapshots are current"
+                    self.scheduleNext(after: remaining, generation: generation)
+                } else {
+                    self.scheduleNext(after: 1, generation: generation)
+                }
             }
         }
     }
@@ -854,13 +853,16 @@ final class Go2RTCBridgeManager {
     static let shared = Go2RTCBridgeManager()
 
     private var process: Process?
-    private var currentSourceId: String?
-    private var currentCameraId: String?
+    private var configuredCameraIds: Set<String> = []
     private var playerGeneration = 0
 
     func streamURL(for camera: GoogleCamera, authManager: AuthManager) throws -> URL {
         try ensureBridge(for: camera, authManager: authManager)
         return playerURL(sourceId: sourceId(for: camera))
+    }
+
+    func configure(cameras: [GoogleCamera], authManager: AuthManager) throws {
+        try startBridge(cameras: cameras, authManager: authManager)
     }
 
     func frameURL(for camera: GoogleCamera, authManager: AuthManager) throws -> URL {
@@ -889,8 +891,16 @@ final class Go2RTCBridgeManager {
     }
 
     private func ensureBridge(for camera: GoogleCamera, authManager: AuthManager) throws {
-        let sourceId = sourceId(for: camera)
-        if process?.isRunning == true, currentSourceId == sourceId, currentCameraId == camera.id {
+        if process?.isRunning == true, configuredCameraIds.contains(camera.id) {
+            return
+        }
+
+        try startBridge(cameras: [camera], authManager: authManager)
+    }
+
+    private func startBridge(cameras: [GoogleCamera], authManager: AuthManager) throws {
+        let cameraIds = Set(cameras.map(\.id))
+        if process?.isRunning == true, configuredCameraIds == cameraIds {
             return
         }
 
@@ -923,8 +933,7 @@ final class Go2RTCBridgeManager {
         }
 
         let configURL = try writeConfig(
-            camera: camera,
-            sourceId: sourceId,
+            cameras: cameras,
             clientId: OAuth2Config.clientId,
             clientSecret: clientSecret,
             refreshToken: refreshToken
@@ -938,8 +947,7 @@ final class Go2RTCBridgeManager {
         try bridgeProcess.run()
 
         process = bridgeProcess
-        currentSourceId = sourceId
-        currentCameraId = camera.id
+        configuredCameraIds = cameraIds
     }
 
     func stop() {
@@ -947,13 +955,11 @@ final class Go2RTCBridgeManager {
             process?.terminate()
         }
         process = nil
-        currentSourceId = nil
-        currentCameraId = nil
+        configuredCameraIds = []
     }
 
     private func writeConfig(
-        camera: GoogleCamera,
-        sourceId: String,
+        cameras: [GoogleCamera],
         clientId: String,
         clientSecret: String,
         refreshToken: String
@@ -961,12 +967,15 @@ final class Go2RTCBridgeManager {
         let directory = SnapshotStore.directory.appendingPathComponent("go2rtc", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let configURL = directory.appendingPathComponent("go2rtc.yaml")
-        let streamURL = nestStreamURL(
-            camera: camera,
-            clientId: clientId,
-            clientSecret: clientSecret,
-            refreshToken: refreshToken
-        )
+        let streams = cameras.map { camera in
+            let streamURL = nestStreamURL(
+                camera: camera,
+                clientId: clientId,
+                clientSecret: clientSecret,
+                refreshToken: refreshToken
+            )
+            return "  \(sourceId(for: camera)): \(yamlSingleQuoted(streamURL))"
+        }.joined(separator: "\n")
 
         let yaml = """
         api:
@@ -978,9 +987,7 @@ final class Go2RTCBridgeManager {
           candidates:
             - "127.0.0.1:18555"
         streams:
-          \(sourceId): \(yamlSingleQuoted(streamURL))
-        preload:
-          \(sourceId): "video=h264&audio=opus"
+        \(streams)
         """
 
         try yaml.write(to: configURL, atomically: true, encoding: .utf8)
@@ -1015,7 +1022,11 @@ final class Go2RTCBridgeManager {
     }
 
     private func sourceId(for camera: GoogleCamera) -> String {
-        "selected_camera"
+        let token = SHA256.hash(data: Data(camera.id.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "camera_\(token)"
     }
 
     private func terminateStaleBridgeProcesses() {
@@ -1107,9 +1118,6 @@ final class LiveFeedModel: ObservableObject {
     func stop() {
         webRTCTimeoutTask?.cancel()
         webRTCTimeoutTask = nil
-        if bridgeURL != nil {
-            Go2RTCBridgeManager.shared.stop()
-        }
         isStarted = false
         rtspURL = nil
         bridgeURL = nil
@@ -1518,11 +1526,7 @@ final class CameraManager: ObservableObject {
                     }
 
                     try? SnapshotStore.writeCatalog(cameras: self.cameras)
-                    if Constants.backgroundSnapshotsEnabled {
-                        SnapshotScheduler.shared.start(cameras: self.cameras, authManager: authManager)
-                    } else {
-                        SnapshotScheduler.shared.stopAll()
-                    }
+                    SnapshotScheduler.shared.start(cameras: self.cameras, authManager: authManager)
                     self.isLoading = false
                 } catch {
                     self.isLoading = false
@@ -1728,7 +1732,6 @@ struct CameraView: View {
     @StateObject private var liveFeedCoordinator = LiveFeedCoordinator()
     @ObservedObject private var snapshotScheduler = SnapshotScheduler.shared
     @AppStorage("viewerLastSelectedCameraId") private var selectedCameraId = ""
-    @AppStorage("viewerAudioVolume") private var audioVolume = 0.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1838,8 +1841,7 @@ struct CameraView: View {
                     model: liveFeedCoordinator.model(for: camera),
                     authManager: authManager,
                     isZoomed: true,
-                    showsMetadata: false,
-                    audioVolume: audioVolume
+                    showsMetadata: false
                 )
                 .id(camera.id)
                 .padding(12)
@@ -1872,14 +1874,7 @@ struct CameraView: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 6) {
-                Label(audioVolume <= 0 ? "Audio muted" : "Preview audio", systemImage: audioVolume <= 0 ? "speaker.slash" : "speaker.wave.2")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                Slider(value: $audioVolume, in: 0...1)
-            }
-
-            Text(Constants.backgroundSnapshotsEnabled ? snapshotScheduler.status : "Widget snapshot updates paused while live preview is active")
+            Text(snapshotScheduler.status)
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .lineLimit(3)
@@ -2324,7 +2319,6 @@ struct CameraFeedTile: View {
     let authManager: AuthManager
     let isZoomed: Bool
     var showsMetadata = true
-    var audioVolume = 0.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2359,13 +2353,6 @@ struct CameraFeedTile: View {
                     }
                 }
 
-                if let bridgeURL = model.bridgeURL, audioVolume > 0 {
-                    BridgeAudioPlayerView(url: bridgeURL, volume: audioVolume)
-                        .frame(width: 1, height: 1)
-                        .opacity(0.01)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
             }
             .aspectRatio(16 / 9, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -2802,95 +2789,6 @@ struct BridgeFramePlayerView: NSViewRepresentable {
                 hasSentFrame = true
                 onFrame()
             }
-        }
-    }
-}
-
-struct BridgeAudioPlayerView: NSViewRepresentable {
-    let url: URL
-    let volume: Double
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    func makeNSView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.allowsAirPlayForMediaPlayback = false
-        configuration.mediaTypesRequiringUserActionForPlayback = []
-
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.setValue(false, forKey: "drawsBackground")
-        context.coordinator.webView = webView
-        context.coordinator.load(url: url, volume: volume)
-        return webView
-    }
-
-    func updateNSView(_ webView: WKWebView, context: Context) {
-        context.coordinator.webView = webView
-        context.coordinator.load(url: url, volume: volume)
-    }
-
-    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
-        coordinator.stop()
-    }
-
-    final class Coordinator {
-        weak var webView: WKWebView?
-        private var loadedURL: URL?
-
-        func load(url: URL, volume: Double) {
-            guard let webView else { return }
-            if loadedURL != url {
-                loadedURL = url
-                webView.loadHTMLString(Self.html(volume: volume), baseURL: url.deletingLastPathComponent())
-            } else {
-                setVolume(volume)
-            }
-        }
-
-        func stop() {
-            webView?.evaluateJavaScript("window.stopAudio && window.stopAudio();")
-            loadedURL = nil
-        }
-
-        private func setVolume(_ volume: Double) {
-            webView?.evaluateJavaScript("window.setVolume && window.setVolume(\(max(0, min(1, volume))));")
-        }
-
-        private static func html(volume: Double) -> String {
-            let clampedVolume = max(0, min(1, volume))
-            return """
-            <!doctype html>
-            <html>
-            <head>
-              <meta name="viewport" content="width=device-width, initial-scale=1">
-              <style>
-                html, body { background: transparent; height: 1px; margin: 0; overflow: hidden; width: 1px; }
-                video { display: none; height: 1px; width: 1px; }
-              </style>
-            </head>
-            <body>
-              <script type="module">
-                import { VideoRTC } from './video-rtc.js';
-                const player = new VideoRTC();
-                player.media = 'audio';
-                player.mode = 'webrtc';
-                player.video.autoplay = true;
-                player.video.playsInline = true;
-                player.video.volume = \(clampedVolume);
-                player.video.muted = \(clampedVolume <= 0 ? "true" : "false");
-                player.src = new URL('api/ws?src=selected_camera', location.href);
-                window.setVolume = value => {
-                  const volume = Math.max(0, Math.min(1, Number(value) || 0));
-                  player.video.volume = volume;
-                  player.video.muted = volume <= 0;
-                };
-                window.stopAudio = () => player.destroy && player.destroy();
-              </script>
-            </body>
-            </html>
-            """
         }
     }
 }

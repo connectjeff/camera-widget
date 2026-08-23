@@ -23,7 +23,7 @@ let package = Package(
             dependencies: [],
             path: "Sources",
             exclude: ["GoogleHomeCameraWidgetExtension"],
-            sources: ["main.swift"]
+            sources: ["CameraWidgetApp.swift"]
         ),
         .executableTarget(
             name: "GoogleHomeCameraWidgetExtension",

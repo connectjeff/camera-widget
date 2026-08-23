@@ -31,10 +31,9 @@ private enum SnapshotStore {
 
     static func load(cameraId: String?) -> CameraSnapshot {
         let catalog = catalog()
-        let camera = cameraId.flatMap { id in catalog.first(where: { $0.id == id }) } ?? catalog.first
-
-        guard let camera else {
-            return CameraSnapshot(image: nil, cameraName: "Google Nest Camera", homeName: nil, roomName: nil, updatedAt: nil)
+        guard let cameraId,
+              let camera = catalog.first(where: { $0.id == cameraId }) else {
+            return CameraSnapshot(image: nil, cameraName: "Choose a camera", homeName: nil, roomName: nil, updatedAt: nil)
         }
 
         let image = NSImage(contentsOf: imageURL(for: camera.id))
@@ -92,7 +91,7 @@ private struct CameraSnapshot {
     }
 }
 
-private struct CameraSelectionEntity: AppEntity {
+struct CameraSelectionEntity: AppEntity {
     static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Camera")
     static let defaultQuery = CameraSelectionQuery()
 
@@ -104,7 +103,7 @@ private struct CameraSelectionEntity: AppEntity {
     }
 }
 
-private struct CameraSelectionQuery: EntityQuery {
+struct CameraSelectionQuery: EntityQuery {
     func entities(for identifiers: [CameraSelectionEntity.ID]) async throws -> [CameraSelectionEntity] {
         SnapshotStore.catalog()
             .filter { identifiers.contains($0.id) }
@@ -116,11 +115,11 @@ private struct CameraSelectionQuery: EntityQuery {
     }
 
     func defaultResult() async -> CameraSelectionEntity? {
-        SnapshotStore.catalog().first.map { CameraSelectionEntity(id: $0.id, title: $0.displayName) }
+        nil
     }
 }
 
-private struct CameraSnapshotConfiguration: WidgetConfigurationIntent {
+struct CameraSnapshotConfiguration: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "Nest Camera"
     static var description = IntentDescription("Choose which Google Nest camera this widget displays.")
 
@@ -139,7 +138,7 @@ private struct CameraSnapshotProvider: AppIntentTimelineProvider {
         CameraSnapshotEntry(
             date: Date(),
             configuration: CameraSnapshotConfiguration(),
-            snapshot: CameraSnapshot(image: nil, cameraName: "Google Nest Camera", homeName: nil, roomName: nil, updatedAt: nil)
+            snapshot: CameraSnapshot(image: nil, cameraName: "Choose a camera", homeName: nil, roomName: nil, updatedAt: nil)
         )
     }
 
@@ -211,7 +210,10 @@ private struct CameraSnapshotWidgetView: View {
         if SnapshotStore.catalog().isEmpty {
             return "Open the camera viewer and load cameras."
         }
-        return "Open the selected camera in the viewer to create a snapshot."
+        if entry.configuration.camera == nil {
+            return "Right-click and choose Edit Widget to select a camera."
+        }
+        return "Waiting for the next camera snapshot. Keep the camera app open."
     }
 }
 
