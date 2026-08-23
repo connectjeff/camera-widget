@@ -1,6 +1,7 @@
 import AppIntents
 import CryptoKit
 import Darwin
+import ImageIO
 import OSLog
 import SwiftUI
 import WidgetKit
@@ -62,7 +63,7 @@ private enum SnapshotStore {
             return CameraSnapshot(image: nil, cameraName: "Choose a camera", homeName: nil, roomName: nil, updatedAt: nil)
         }
 
-        let image = NSImage(contentsOf: imageURL(for: camera.id))
+        let image = loadImage(cameraId: camera.id)
         let metadata = try? JSONDecoder().decode(SnapshotMetadata.self, from: Data(contentsOf: metadataURL(for: camera.id)))
 
         return CameraSnapshot(
@@ -72,6 +73,23 @@ private enum SnapshotStore {
             roomName: metadata?.roomName ?? camera.roomName,
             updatedAt: metadata?.updatedAt
         )
+    }
+
+    private static func loadImage(cameraId: String) -> CGImage? {
+        let url = imageURL(for: cameraId)
+        do {
+            let data = try Data(contentsOf: url)
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                logger.error("Unable to decode camera snapshot at \(url.path, privacy: .public)")
+                return nil
+            }
+            logger.info("Loaded camera snapshot \(image.width, privacy: .public)x\(image.height, privacy: .public)")
+            return image
+        } catch {
+            logger.error("Unable to read camera snapshot at \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     private static func fileToken(for value: String) -> String {
@@ -102,7 +120,7 @@ private struct SnapshotMetadata: Decodable {
 }
 
 private struct CameraSnapshot {
-    let image: NSImage?
+    let image: CGImage?
     let cameraName: String
     let homeName: String?
     let roomName: String?
@@ -187,8 +205,9 @@ private struct CameraSnapshotWidgetView: View {
             Color.black
 
             if let image = entry.snapshot.image {
-                Image(nsImage: image)
+                Image(decorative: image, scale: 1, orientation: .up)
                     .resizable()
+                    .widgetAccentedRenderingMode(.fullColor)
                     .aspectRatio(contentMode: .fill)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()

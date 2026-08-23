@@ -33,6 +33,11 @@ fi
 
 DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" "${BUILD_SCRIPT}" --pkg
 
+xcrun swift \
+    -module-cache-path "${REPO_DIR}/build/WidgetRenderModuleCache" \
+    "${REPO_DIR}/scripts/widget_render_smoke.swift" \
+    "${REPO_DIR}/Assets/AppIcon.png"
+
 pkgutil --payload-files "${PACKAGE_PATH}" | grep -q './Applications/GoogleHomeCameraWidget.app$'
 pkgutil --payload-files "${PACKAGE_PATH}" | grep -q './Applications/GoogleHomeCameraWidget.app/Contents/PlugIns/GoogleHomeCameraWidgetExtension.appex$'
 
