@@ -93,13 +93,21 @@ mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources" "${EXTENSIO
 cp "${EXECUTABLE_PATH}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 cp "${EXTENSION_EXECUTABLE_PATH}" "${EXTENSION_DIR}/Contents/MacOS/${EXTENSION_NAME}"
 
-if command -v xcrun >/dev/null 2>&1; then
+if [[ -x "${BUILD_DIR}/tools/go2rtc-patched" ]]; then
+    mkdir -p "${APP_DIR}/Contents/Resources/Tools"
+    cp "${BUILD_DIR}/tools/go2rtc-patched" "${APP_DIR}/Contents/Resources/Tools/go2rtc-patched"
+    chmod 755 "${APP_DIR}/Contents/Resources/Tools/go2rtc-patched"
+fi
+
+if command -v xcrun >/dev/null 2>&1 && xcrun -f actool >/dev/null 2>&1; then
     xcrun actool "${APP_ICON_CATALOG}" \
         --compile "${APP_DIR}/Contents/Resources" \
         --platform macosx \
         --minimum-deployment-target 26.0 \
         --app-icon AppIcon \
         --output-partial-info-plist "${BUILD_DIR}/assetcatalog-info.plist" >/dev/null
+else
+    echo "Skipping AppIcon asset catalog compilation because actool is unavailable in the active developer tools."
 fi
 
 cat > "${APP_DIR}/Contents/Info.plist" <<PLIST

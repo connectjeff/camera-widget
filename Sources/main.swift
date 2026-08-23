@@ -143,7 +143,7 @@ enum CameraSelectionLogic {
         if cameras.contains(where: { $0.id == currentId }) {
             return currentId
         }
-        return cameras[0].id
+        return ""
     }
 }
 
@@ -647,8 +647,6 @@ final class CameraSnapshotWorker {
     private var camera: GoogleCamera
     private weak var authManager: AuthManager?
     private var timer: Timer?
-    private var hiddenWindow: NSWindow?
-    private var webRTCSession: HiddenWebRTCSession?
 
     init(camera: GoogleCamera, authManager: AuthManager) {
         self.camera = camera
@@ -686,10 +684,6 @@ final class CameraSnapshotWorker {
 
     func stop() {
         stopTimerOnly()
-        webRTCSession?.stop()
-        webRTCSession = nil
-        hiddenWindow?.close()
-        hiddenWindow = nil
     }
 
     private func stopTimerOnly() {
@@ -700,141 +694,12 @@ final class CameraSnapshotWorker {
     private func capture() {
         guard let authManager else { return }
 
-        authManager.validAccessToken { [weak self] result in
+        Go2RTCBridgeManager.shared.captureFrame(for: camera, authManager: authManager) { [weak self] image in
             Task { @MainActor in
-                guard let self else { return }
-
-                switch result {
-                case .success(let accessToken):
-                    if self.camera.supportsWebRTC {
-                        self.captureWebRTC(accessToken: accessToken)
-                    } else if self.camera.supportsRTSP {
-                        self.captureRTSP(accessToken: accessToken)
-                    }
-                case .failure:
-                    break
-                }
+                guard let self, let image else { return }
+                try? SnapshotStore.write(image: image, camera: self.camera)
             }
         }
-    }
-
-    private func captureRTSP(accessToken: String) {
-        executeStreamCommand(
-            command: "sdm.devices.commands.CameraLiveStream.GenerateRtspStream",
-            params: [:],
-            accessToken: accessToken
-        ) { [weak self] result in
-            Task { @MainActor in
-                guard let self else { return }
-
-                guard case .success(let data) = result,
-                      let response = try? JSONDecoder().decode(GenerateRTSPStreamResponse.self, from: data),
-                      let urlString = response.results.streamUrls?["rtspUrl"],
-                      let url = URL(string: urlString) else {
-                    return
-                }
-
-                let playerView = AVPlayerView(frame: NSRect(x: 0, y: 0, width: 640, height: 360))
-                playerView.controlsStyle = .none
-                playerView.videoGravity = .resizeAspect
-                playerView.player = AVPlayer(url: url)
-                self.installHidden(view: playerView)
-                playerView.player?.play()
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-                    guard let image = playerView.snapshotImage() else { return }
-                    try? SnapshotStore.write(image: image, camera: self.camera)
-                    playerView.player?.pause()
-                }
-            }
-        }
-    }
-
-    private func captureWebRTC(accessToken: String) {
-        webRTCSession?.stop()
-        let session = HiddenWebRTCSession(camera: camera) { [weak self] offerSdp in
-            self?.executeStreamCommand(
-                command: "sdm.devices.commands.CameraLiveStream.GenerateWebRtcStream",
-                params: ["offerSdp": offerSdp],
-                accessToken: accessToken
-            ) { [weak self] result in
-                Task { @MainActor in
-                    guard case .success(let data) = result,
-                          let response = try? JSONDecoder().decode(GenerateWebRTCStreamResponse.self, from: data) else {
-                        return
-                    }
-
-                    self?.webRTCSession?.apply(answerSdp: response.results.answerSdp)
-                }
-            }
-        } onSnapshot: { camera, image in
-            try? SnapshotStore.write(image: image, camera: camera)
-        }
-        webRTCSession = session
-        installHidden(view: session.webView)
-        session.start()
-    }
-
-    private func executeStreamCommand(
-        command: String,
-        params: [String: Any],
-        accessToken: String,
-        completion: @escaping (Result<Data, Error>) -> Void
-    ) {
-        let urlString = "https://smartdevicemanagement.googleapis.com/v1/\(camera.resourceName):executeCommand"
-        guard let url = URL(string: urlString) else {
-            completion(.failure(NSError(domain: Constants.appName, code: -20)))
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["command": command, "params": params])
-        } catch {
-            completion(.failure(error))
-            return
-        }
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error {
-                completion(.failure(error))
-                return
-            }
-
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200..<300).contains(httpResponse.statusCode),
-                  let data else {
-                completion(.failure(NSError(domain: Constants.appName, code: -21)))
-                return
-            }
-
-            completion(.success(data))
-        }.resume()
-    }
-
-    private func installHidden(view: NSView) {
-        let window: NSWindow
-        if let hiddenWindow {
-            window = hiddenWindow
-        } else {
-            window = NSWindow(
-                contentRect: NSRect(x: -2000, y: -2000, width: 640, height: 360),
-                styleMask: [.borderless],
-                backing: .buffered,
-                defer: false
-            )
-            window.alphaValue = 0.01
-            window.ignoresMouseEvents = true
-            window.orderBack(nil)
-            hiddenWindow = window
-        }
-
-        view.frame = NSRect(x: 0, y: 0, width: 640, height: 360)
-        window.contentView = view
     }
 }
 
@@ -985,11 +850,210 @@ final class BroadcastBridgeController: ObservableObject {
 }
 
 @MainActor
+final class Go2RTCBridgeManager {
+    static let shared = Go2RTCBridgeManager()
+
+    private var process: Process?
+    private var currentSourceId: String?
+    private var currentCameraId: String?
+    private var playerGeneration = 0
+
+    func streamURL(for camera: GoogleCamera, authManager: AuthManager) throws -> URL {
+        try ensureBridge(for: camera, authManager: authManager)
+        return playerURL(sourceId: sourceId(for: camera))
+    }
+
+    func frameURL(for camera: GoogleCamera, authManager: AuthManager) throws -> URL {
+        try ensureBridge(for: camera, authManager: authManager)
+        return frameURL(sourceId: sourceId(for: camera))
+    }
+
+    func mjpegURL(for camera: GoogleCamera, authManager: AuthManager) throws -> URL {
+        try ensureBridge(for: camera, authManager: authManager)
+        return mjpegURL(sourceId: sourceId(for: camera))
+    }
+
+    func captureFrame(for camera: GoogleCamera, authManager: AuthManager, completion: @escaping (NSImage?) -> Void) {
+        do {
+            let url = try frameURL(for: camera, authManager: authManager)
+            URLSession.shared.dataTask(with: URLRequest(url: url, timeoutInterval: 15)) { data, _, _ in
+                guard let data, let image = NSImage(data: data) else {
+                    completion(nil)
+                    return
+                }
+                completion(image)
+            }.resume()
+        } catch {
+            completion(nil)
+        }
+    }
+
+    private func ensureBridge(for camera: GoogleCamera, authManager: AuthManager) throws {
+        let sourceId = sourceId(for: camera)
+        if process?.isRunning == true, currentSourceId == sourceId, currentCameraId == camera.id {
+            return
+        }
+
+        stop()
+        terminateStaleBridgeProcesses()
+        playerGeneration += 1
+
+        guard let binaryURL = binaryURL() else {
+            throw NSError(
+                domain: Constants.appName,
+                code: -110,
+                userInfo: [NSLocalizedDescriptionKey: "Missing go2rtc bridge binary. Rebuild the app package after building build/tools/go2rtc-patched."]
+            )
+        }
+
+        guard let refreshToken = authManager.token?.refreshToken, !refreshToken.isEmpty else {
+            throw NSError(
+                domain: Constants.appName,
+                code: -111,
+                userInfo: [NSLocalizedDescriptionKey: "Google did not provide a refresh token. Sign out, sign in again, and approve offline access."]
+            )
+        }
+
+        guard !OAuth2Config.clientId.isEmpty, let clientSecret = OAuth2Config.clientSecret, !clientSecret.isEmpty else {
+            throw NSError(
+                domain: Constants.appName,
+                code: -112,
+                userInfo: [NSLocalizedDescriptionKey: "go2rtc Nest bridge requires clientId and clientSecret in oauth2.json."]
+            )
+        }
+
+        let configURL = try writeConfig(
+            camera: camera,
+            sourceId: sourceId,
+            clientId: OAuth2Config.clientId,
+            clientSecret: clientSecret,
+            refreshToken: refreshToken
+        )
+
+        let bridgeProcess = Process()
+        bridgeProcess.executableURL = binaryURL
+        bridgeProcess.arguments = ["-c", configURL.path]
+        bridgeProcess.standardOutput = Pipe()
+        bridgeProcess.standardError = Pipe()
+        try bridgeProcess.run()
+
+        process = bridgeProcess
+        currentSourceId = sourceId
+        currentCameraId = camera.id
+    }
+
+    func stop() {
+        if process?.isRunning == true {
+            process?.terminate()
+        }
+        process = nil
+        currentSourceId = nil
+        currentCameraId = nil
+    }
+
+    private func writeConfig(
+        camera: GoogleCamera,
+        sourceId: String,
+        clientId: String,
+        clientSecret: String,
+        refreshToken: String
+    ) throws -> URL {
+        let directory = SnapshotStore.directory.appendingPathComponent("go2rtc", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let configURL = directory.appendingPathComponent("go2rtc.yaml")
+        let streamURL = nestStreamURL(
+            camera: camera,
+            clientId: clientId,
+            clientSecret: clientSecret,
+            refreshToken: refreshToken
+        )
+
+        let yaml = """
+        api:
+          listen: "127.0.0.1:11984"
+        rtsp:
+          listen: ""
+        webrtc:
+          listen: "127.0.0.1:18555"
+          candidates:
+            - "127.0.0.1:18555"
+        streams:
+          \(sourceId): \(yamlSingleQuoted(streamURL))
+        preload:
+          \(sourceId): "video=h264&audio=opus"
+        """
+
+        try yaml.write(to: configURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+        return configURL
+    }
+
+    private func nestStreamURL(camera: GoogleCamera, clientId: String, clientSecret: String, refreshToken: String) -> String {
+        var components = URLComponents()
+        components.scheme = "nest"
+        components.queryItems = [
+            URLQueryItem(name: "client_id", value: clientId),
+            URLQueryItem(name: "client_secret", value: clientSecret),
+            URLQueryItem(name: "refresh_token", value: refreshToken),
+            URLQueryItem(name: "project_id", value: OAuth2Config.deviceAccessProjectId),
+            URLQueryItem(name: "device_id", value: camera.resourceName.components(separatedBy: "/").last ?? camera.resourceName),
+            URLQueryItem(name: "protocols", value: "WEB_RTC")
+        ]
+        return components.string ?? ""
+    }
+
+    private func playerURL(sourceId: String) -> URL {
+        URL(string: "http://127.0.0.1:11984/stream.html?src=\(sourceId)&mode=webrtc&_=\(playerGeneration)")!
+    }
+
+    private func frameURL(sourceId: String) -> URL {
+        URL(string: "http://127.0.0.1:11984/api/frame.jpeg?src=\(sourceId)&w=1280&_=\(playerGeneration)-\(Date().timeIntervalSince1970)")!
+    }
+
+    private func mjpegURL(sourceId: String) -> URL {
+        URL(string: "http://127.0.0.1:11984/api/stream.mjpeg?src=\(sourceId)&w=1280&_=\(playerGeneration)")!
+    }
+
+    private func sourceId(for camera: GoogleCamera) -> String {
+        "selected_camera"
+    }
+
+    private func terminateStaleBridgeProcesses() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        process.arguments = ["-f", "go2rtc-patched"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
+    }
+
+    private func yamlSingleQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
+    }
+
+    private func binaryURL() -> URL? {
+        let fileManager = FileManager.default
+        let candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent("Tools/go2rtc-patched"),
+            URL(fileURLWithPath: fileManager.currentDirectoryPath).appendingPathComponent("build/tools/go2rtc-patched"),
+            URL(fileURLWithPath: fileManager.currentDirectoryPath).appendingPathComponent("build/tools/go2rtc/go2rtc")
+        ].compactMap { $0 }
+
+        return candidates.first { fileManager.isExecutableFile(atPath: $0.path) }
+    }
+}
+
+@MainActor
 final class LiveFeedModel: ObservableObject {
     @Published var rtspURL: URL?
+    @Published var bridgeURL: URL?
+    @Published var frameURL: URL?
+    @Published var mjpegURL: URL?
     @Published var webRTCAnswerSdp: String?
     @Published var status: String?
     @Published var errorMessage: String?
+    @Published var hasFrame = false
 
     private(set) var camera: GoogleCamera
     private var isStarted = false
@@ -1007,12 +1071,14 @@ final class LiveFeedModel: ObservableObject {
 
         stop()
         self.camera = camera
+        hasFrame = false
     }
 
     func start(authManager: AuthManager) {
         guard !isStarted else { return }
         isStarted = true
         errorMessage = nil
+        hasFrame = false
 
         if Constants.mockMode {
             status = "Mock stream ready."
@@ -1031,7 +1097,7 @@ final class LiveFeedModel: ObservableObject {
                 }
             }
         } else if camera.supportsWebRTC {
-            status = "Starting WebRTC..."
+            startGo2RTCBridge(authManager: authManager)
         } else {
             status = nil
             errorMessage = "No supported stream protocol."
@@ -1041,11 +1107,31 @@ final class LiveFeedModel: ObservableObject {
     func stop() {
         webRTCTimeoutTask?.cancel()
         webRTCTimeoutTask = nil
+        if bridgeURL != nil {
+            Go2RTCBridgeManager.shared.stop()
+        }
         isStarted = false
         rtspURL = nil
+        bridgeURL = nil
+        frameURL = nil
+        mjpegURL = nil
         webRTCAnswerSdp = nil
         status = nil
         errorMessage = nil
+        hasFrame = false
+    }
+
+    private func startGo2RTCBridge(authManager: AuthManager) {
+        status = "Starting local WebRTC bridge..."
+        do {
+            bridgeURL = try Go2RTCBridgeManager.shared.streamURL(for: camera, authManager: authManager)
+            frameURL = try Go2RTCBridgeManager.shared.frameURL(for: camera, authManager: authManager)
+            mjpegURL = try Go2RTCBridgeManager.shared.mjpegURL(for: camera, authManager: authManager)
+            status = "Waiting for first camera frame..."
+        } catch {
+            status = nil
+            errorMessage = "Local WebRTC bridge failed: \(error.localizedDescription)"
+        }
     }
 
     func generateWebRTC(offerSdp: String, authManager: AuthManager) {
@@ -1641,7 +1727,8 @@ struct CameraView: View {
     @StateObject private var cameraManager = CameraManager()
     @StateObject private var liveFeedCoordinator = LiveFeedCoordinator()
     @ObservedObject private var snapshotScheduler = SnapshotScheduler.shared
-    @State private var selectedCameraId = ""
+    @AppStorage("viewerLastSelectedCameraId") private var selectedCameraId = ""
+    @AppStorage("viewerAudioVolume") private var audioVolume = 0.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1750,12 +1837,17 @@ struct CameraView: View {
                     camera: camera,
                     model: liveFeedCoordinator.model(for: camera),
                     authManager: authManager,
-                    isZoomed: true
+                    isZoomed: true,
+                    showsMetadata: false,
+                    audioVolume: audioVolume
                 )
                 .id(camera.id)
                 .padding(12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ContentUnavailableView("Select a streamable camera", systemImage: "video")
+                CameraPlaceholderView(cameraCount: streamableCameras.count)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .onAppear(perform: selectDefaultCameraIfNeeded)
@@ -1773,17 +1865,28 @@ struct CameraView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             CameraSelectionTable(cameras: streamableCameras, selectedCameraId: $selectedCameraId)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             Divider()
 
-                Text(Constants.backgroundSnapshotsEnabled ? snapshotScheduler.status : "Widget snapshot updates paused while live preview is active")
+            VStack(alignment: .leading, spacing: 6) {
+                Label(audioVolume <= 0 ? "Audio muted" : "Preview audio", systemImage: audioVolume <= 0 ? "speaker.slash" : "speaker.wave.2")
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                    .lineLimit(3)
+                Slider(value: $audioVolume, in: 0...1)
+            }
+
+            Text(Constants.backgroundSnapshotsEnabled ? snapshotScheduler.status : "Widget snapshot updates paused while live preview is active")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(width: 220)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
         .padding(10)
     }
 
@@ -1792,7 +1895,7 @@ struct CameraView: View {
     }
 
     private var selectedCamera: GoogleCamera? {
-        streamableCameras.first { $0.id == selectedCameraId } ?? streamableCameras.first
+        streamableCameras.first { $0.id == selectedCameraId }
     }
 
     private var groupedStreamableCameras: [(home: String, cameras: [GoogleCamera])] {
@@ -1800,7 +1903,9 @@ struct CameraView: View {
     }
 
     private func selectDefaultCameraIfNeeded() {
-        selectedCameraId = CameraSelectionLogic.selectedCameraId(currentId: selectedCameraId, cameras: streamableCameras)
+        if !selectedCameraId.isEmpty && !streamableCameras.contains(where: { $0.id == selectedCameraId }) {
+            selectedCameraId = ""
+        }
     }
 
     @ViewBuilder
@@ -1992,10 +2097,11 @@ struct CameraSelectionTable: NSViewRepresentable {
             textField.maximumNumberOfLines = 2
             textField.font = font(for: rows[row])
             textField.textColor = textColor(for: rows[row])
+            textField.alignment = .left
             cell.addSubview(textField)
 
             NSLayoutConstraint.activate([
-                textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+                textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 0),
                 textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
                 textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
             ])
@@ -2005,7 +2111,7 @@ struct CameraSelectionTable: NSViewRepresentable {
 
         private func selectRow(for id: String) {
             guard let tableView else { return }
-            let row = rows.firstIndex { $0.selectionId == id } ?? rows.firstIndex { $0.selectionId != nil }
+            let row = id.isEmpty ? nil : rows.firstIndex { $0.selectionId == id }
 
             isProgrammaticSelection = true
             if let row {
@@ -2218,6 +2324,7 @@ struct CameraFeedTile: View {
     let authManager: AuthManager
     let isZoomed: Bool
     var showsMetadata = true
+    var audioVolume = 0.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2229,17 +2336,20 @@ struct CameraFeedTile: View {
                 } else if let rtspURL = model.rtspURL {
                     RTSPPlayerView(url: rtspURL)
                         .allowsHitTesting(false)
-                } else if camera.supportsWebRTC {
-                    WebRTCPlayerView(answerSdp: model.webRTCAnswerSdp) { offerSdp in
-                        model.generateWebRTC(offerSdp: offerSdp, authManager: authManager)
-                    } onStatus: { status in
-                        model.status = status
-                    } onError: { message in
-                        model.errorMessage = message
+                } else if let frameURL = model.frameURL {
+                    BridgeFramePlayerView(frameURL: frameURL, mjpegURL: model.mjpegURL) {
+                        model.hasFrame = true
+                        model.status = "Live frame updates active"
                     }
-                    .allowsHitTesting(false)
+                        .allowsHitTesting(false)
+                } else if camera.supportsWebRTC {
+                    LoadingPreviewView(status: model.status ?? "Preparing camera stream...")
                 } else {
                     unavailableView
+                }
+
+                if !model.hasFrame, !Constants.mockMode {
+                    LoadingPreviewView(status: model.status ?? "Preparing camera stream...")
                 }
 
                 VStack {
@@ -2248,9 +2358,19 @@ struct CameraFeedTile: View {
                         metadataBar
                     }
                 }
+
+                if let bridgeURL = model.bridgeURL, audioVolume > 0 {
+                    BridgeAudioPlayerView(url: bridgeURL, volume: audioVolume)
+                        .frame(width: 1, height: 1)
+                        .opacity(0.01)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
             }
             .aspectRatio(16 / 9, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
 
             if isZoomed, showsMetadata {
                 detailStatus
@@ -2342,6 +2462,35 @@ struct CameraFeedTile: View {
     }
 }
 
+struct CameraPlaceholderView: View {
+    let cameraCount: Int
+
+    var body: some View {
+        ZStack {
+            Color.black
+
+            VStack(spacing: 14) {
+                Image(systemName: "video")
+                    .font(.system(size: 48, weight: .medium))
+                    .foregroundColor(.white.opacity(0.72))
+
+                VStack(spacing: 4) {
+                    Text("Select a camera")
+                        .font(.title3)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.white)
+                    Text("\(cameraCount) streamable camera\(cameraCount == 1 ? "" : "s") available")
+                        .font(.callout)
+                        .foregroundColor(.white.opacity(0.58))
+                }
+            }
+        }
+        .aspectRatio(16 / 9, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 extension NSView {
     func snapshotImage() -> NSImage? {
         let bounds = bounds
@@ -2422,6 +2571,330 @@ struct RTSPPlayerView: NSViewRepresentable {
     }
 }
 
+struct LoadingPreviewView: View {
+    let status: String
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.82)
+            VStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.large)
+                Text(status)
+                    .font(.callout)
+                    .foregroundColor(.white.opacity(0.72))
+                    .multilineTextAlignment(.center)
+            }
+            .padding(20)
+        }
+    }
+}
+
+final class FrameImageContainerView: NSView {
+    let imageView = NSImageView()
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.wantsLayer = true
+        imageView.layer?.backgroundColor = NSColor.black.cgColor
+        imageView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        imageView.setContentHuggingPriority(.defaultLow, for: .vertical)
+        imageView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        imageView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+
+        addSubview(imageView)
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            imageView.topAnchor.constraint(equalTo: topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+}
+
+struct BridgeFramePlayerView: NSViewRepresentable {
+    let frameURL: URL
+    let mjpegURL: URL?
+    let onFrame: () -> Void
+
+    init(frameURL: URL, mjpegURL: URL?, onFrame: @escaping () -> Void) {
+        self.frameURL = frameURL
+        self.mjpegURL = mjpegURL
+        self.onFrame = onFrame
+    }
+
+    init(url: URL, onFrame: @escaping () -> Void) {
+        self.frameURL = url
+        self.mjpegURL = nil
+        self.onFrame = onFrame
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onFrame: onFrame)
+    }
+
+    func makeNSView(context: Context) -> FrameImageContainerView {
+        let container = FrameImageContainerView()
+        context.coordinator.start(frameURL: frameURL, mjpegURL: mjpegURL, imageView: container.imageView)
+        SnapshotSource.shared.view = container
+        return container
+    }
+
+    func updateNSView(_ container: FrameImageContainerView, context: Context) {
+        context.coordinator.start(frameURL: frameURL, mjpegURL: mjpegURL, imageView: container.imageView)
+        SnapshotSource.shared.view = container
+    }
+
+    static func dismantleNSView(_ nsView: FrameImageContainerView, coordinator: Coordinator) {
+        coordinator.stop()
+        if SnapshotSource.shared.view === nsView {
+            SnapshotSource.shared.view = nil
+        }
+    }
+
+    final class Coordinator: NSObject, URLSessionDataDelegate {
+        weak var imageView: NSImageView?
+
+        private var loadedFrameURL: URL?
+        private var loadedMJPEGURL: URL?
+        private var fallbackTimer: Timer?
+        private var session: URLSession?
+        private var streamTask: URLSessionDataTask?
+        private var buffer = Data()
+        private var isLoadingFallback = false
+        private var hasSentFrame = false
+        private var lastMJPEGFrameAt: Date?
+        private var onFrame: () -> Void
+
+        init(onFrame: @escaping () -> Void) {
+            self.onFrame = onFrame
+        }
+
+        func start(frameURL: URL, mjpegURL: URL?, imageView: NSImageView) {
+            self.imageView = imageView
+            guard loadedFrameURL != frameURL || loadedMJPEGURL != mjpegURL else { return }
+
+            stop()
+            self.imageView = imageView
+            loadedFrameURL = frameURL
+            loadedMJPEGURL = mjpegURL
+            hasSentFrame = false
+            lastMJPEGFrameAt = nil
+
+            startMJPEGStream()
+            loadFallbackFrame()
+            fallbackTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                self?.loadFallbackFrameIfNeeded()
+            }
+        }
+
+        func stop() {
+            fallbackTimer?.invalidate()
+            fallbackTimer = nil
+            streamTask?.cancel()
+            streamTask = nil
+            session?.invalidateAndCancel()
+            session = nil
+            loadedFrameURL = nil
+            loadedMJPEGURL = nil
+            buffer.removeAll(keepingCapacity: false)
+            isLoadingFallback = false
+            lastMJPEGFrameAt = nil
+        }
+
+        private func startMJPEGStream() {
+            guard let loadedMJPEGURL else { return }
+
+            let queue = OperationQueue()
+            queue.maxConcurrentOperationCount = 1
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForRequest = 30
+            configuration.timeoutIntervalForResource = 0
+            let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
+            let task = session.dataTask(with: URLRequest(url: loadedMJPEGURL, timeoutInterval: 30))
+            self.session = session
+            streamTask = task
+            task.resume()
+        }
+
+        private func loadFallbackFrameIfNeeded() {
+            if let lastMJPEGFrameAt, Date().timeIntervalSince(lastMJPEGFrameAt) < 3 {
+                return
+            }
+            loadFallbackFrame()
+        }
+
+        private func loadFallbackFrame() {
+            guard !isLoadingFallback, let loadedFrameURL else { return }
+            isLoadingFallback = true
+
+            var components = URLComponents(url: loadedFrameURL, resolvingAgainstBaseURL: false)
+            var queryItems = components?.queryItems ?? []
+            queryItems.removeAll { $0.name == "_" }
+            queryItems.append(URLQueryItem(name: "_", value: "\(Date().timeIntervalSince1970)"))
+            components?.queryItems = queryItems
+            let requestURL = components?.url ?? loadedFrameURL
+
+            URLSession.shared.dataTask(with: URLRequest(url: requestURL, timeoutInterval: 10)) { [weak self] data, _, _ in
+                guard let self else { return }
+                let image = data.flatMap { NSImage(data: $0) }
+                DispatchQueue.main.async {
+                    self.isLoadingFallback = false
+                    self.display(image)
+                }
+            }.resume()
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            buffer.append(data)
+            parseJPEGFrames()
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            guard error == nil else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.loadFallbackFrame()
+            }
+        }
+
+        private func parseJPEGFrames() {
+            let startMarker = Data([0xFF, 0xD8])
+            let endMarker = Data([0xFF, 0xD9])
+
+            while let startRange = buffer.range(of: startMarker),
+                  let endRange = buffer.range(of: endMarker, options: [], in: startRange.upperBound..<buffer.endIndex) {
+                let jpegData = Data(buffer[startRange.lowerBound..<endRange.upperBound])
+                buffer.removeSubrange(buffer.startIndex..<endRange.upperBound)
+
+                guard let image = NSImage(data: jpegData) else { continue }
+                DispatchQueue.main.async { [weak self] in
+                    self?.lastMJPEGFrameAt = Date()
+                    self?.display(image)
+                }
+            }
+
+            if buffer.count > 4_000_000 {
+                if let startRange = buffer.range(of: startMarker) {
+                    buffer.removeSubrange(buffer.startIndex..<startRange.lowerBound)
+                } else {
+                    buffer.removeAll(keepingCapacity: true)
+                }
+            }
+        }
+
+        private func display(_ image: NSImage?) {
+            guard let image else { return }
+            imageView?.image = image
+            if !hasSentFrame {
+                hasSentFrame = true
+                onFrame()
+            }
+        }
+    }
+}
+
+struct BridgeAudioPlayerView: NSViewRepresentable {
+    let url: URL
+    let volume: Double
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.allowsAirPlayForMediaPlayback = false
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.setValue(false, forKey: "drawsBackground")
+        context.coordinator.webView = webView
+        context.coordinator.load(url: url, volume: volume)
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.webView = webView
+        context.coordinator.load(url: url, volume: volume)
+    }
+
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        coordinator.stop()
+    }
+
+    final class Coordinator {
+        weak var webView: WKWebView?
+        private var loadedURL: URL?
+
+        func load(url: URL, volume: Double) {
+            guard let webView else { return }
+            if loadedURL != url {
+                loadedURL = url
+                webView.loadHTMLString(Self.html(volume: volume), baseURL: url.deletingLastPathComponent())
+            } else {
+                setVolume(volume)
+            }
+        }
+
+        func stop() {
+            webView?.evaluateJavaScript("window.stopAudio && window.stopAudio();")
+            loadedURL = nil
+        }
+
+        private func setVolume(_ volume: Double) {
+            webView?.evaluateJavaScript("window.setVolume && window.setVolume(\(max(0, min(1, volume))));")
+        }
+
+        private static func html(volume: Double) -> String {
+            let clampedVolume = max(0, min(1, volume))
+            return """
+            <!doctype html>
+            <html>
+            <head>
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+              <style>
+                html, body { background: transparent; height: 1px; margin: 0; overflow: hidden; width: 1px; }
+                video { display: none; height: 1px; width: 1px; }
+              </style>
+            </head>
+            <body>
+              <script type="module">
+                import { VideoRTC } from './video-rtc.js';
+                const player = new VideoRTC();
+                player.media = 'audio';
+                player.mode = 'webrtc';
+                player.video.autoplay = true;
+                player.video.playsInline = true;
+                player.video.volume = \(clampedVolume);
+                player.video.muted = \(clampedVolume <= 0 ? "true" : "false");
+                player.src = new URL('api/ws?src=selected_camera', location.href);
+                window.setVolume = value => {
+                  const volume = Math.max(0, Math.min(1, Number(value) || 0));
+                  player.video.volume = volume;
+                  player.video.muted = volume <= 0;
+                };
+                window.stopAudio = () => player.destroy && player.destroy();
+              </script>
+            </body>
+            </html>
+            """
+        }
+    }
+}
+
 struct WebRTCPlayerView: NSViewRepresentable {
     let answerSdp: String?
     let onOffer: (String) -> Void
@@ -2444,6 +2917,7 @@ struct WebRTCPlayerView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
         context.coordinator.webView = webView
+        webView.navigationDelegate = context.coordinator
         SnapshotSource.shared.view = webView
         webView.loadHTMLString(Self.html, baseURL: URL(string: "https://localhost"))
         return webView
@@ -2468,7 +2942,7 @@ struct WebRTCPlayerView: NSViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         weak var webView: WKWebView?
         var appliedAnswerSdp: String?
 
@@ -2491,14 +2965,34 @@ struct WebRTCPlayerView: NSViewRepresentable {
             switch type {
             case "offer":
                 guard let sdp = body["sdp"] as? String else { return }
+                let mLines = body["mLines"] as? String ?? "unknown"
+                let hasTrailingNewline = body["hasTrailingNewline"] as? Bool ?? false
+                let candidateCount = body["candidateCount"] as? Int ?? 0
+                onStatus("Created WebRTC offer. m-lines: \(mLines). candidates: \(candidateCount). trailing newline: \(hasTrailingNewline ? "yes" : "no").")
                 onOffer(sdp)
             case "status":
                 onStatus(body["message"] as? String)
+            case "frame":
+                let width = body["width"] as? Int ?? 0
+                let height = body["height"] as? Int ?? 0
+                onStatus("WebRTC video frame received: \(width)x\(height).")
             case "error":
                 onError(body["message"] as? String ?? "Unknown WebRTC error.")
             default:
                 break
             }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            onStatus("WebRTC engine loaded.")
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            onError("WebRTC engine failed to load: \(error.localizedDescription)")
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            onError("WebRTC engine failed to start: \(error.localizedDescription)")
         }
 
         func applyAnswer(_ answerSdp: String) {
@@ -2514,6 +3008,8 @@ struct WebRTCPlayerView: NSViewRepresentable {
                 webView.evaluateJavaScript("window.applyAnswer(\(encoded));") { [weak self] _, error in
                     if let error {
                         self?.onError("Failed to apply WebRTC answer: \(error.localizedDescription)")
+                    } else {
+                        self?.onStatus("Google WebRTC answer applied.")
                     }
                 }
             } catch {
@@ -2553,17 +3049,22 @@ struct WebRTCPlayerView: NSViewRepresentable {
 
         async function start() {
           try {
+            post('status', { message: 'Starting WebRTC engine...' });
             if (!window.RTCPeerConnection) {
               post('error', { message: 'WKWebView does not expose RTCPeerConnection on this macOS build.' });
               return;
             }
 
-            pc = new RTCPeerConnection({ iceServers: [] });
+            pc = new RTCPeerConnection({
+              iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
             pc.ontrack = event => {
               const [stream] = event.streams;
               if (stream) {
-                document.getElementById('remoteVideo').srcObject = stream;
-                post('status', { message: 'WebRTC stream connected.' });
+                const video = document.getElementById('remoteVideo');
+                video.srcObject = stream;
+                post('status', { message: 'Remote WebRTC track received.' });
+                waitForFrame(video);
               }
             };
             pc.onconnectionstatechange = () => post('status', { message: `WebRTC state: ${pc.connectionState}` });
@@ -2576,16 +3077,40 @@ struct WebRTCPlayerView: NSViewRepresentable {
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
             await waitForIceGatheringComplete();
-            post('offer', { sdp: pc.localDescription.sdp });
+            const sdp = pc.localDescription.sdp.endsWith('\\n') ? pc.localDescription.sdp : pc.localDescription.sdp + '\\r\\n';
+            const mLines = [...sdp.matchAll(/^m=([^\\s]+)/gm)].map(match => match[1]).join(',');
+            const candidates = [...sdp.matchAll(/^a=candidate:(.+)$/gm)].map(match => match[1]);
+            const hasUsableCandidate = candidates.some(candidate => !candidate.includes(' 0.0.0.0 ') && !candidate.includes(' IP4 0.0.0.0'));
+            if (mLines !== 'audio,video,application') {
+              post('error', { message: `Generated WebRTC offer does not match Google's required m-line order. Got: ${mLines || 'none'}` });
+              return;
+            }
+            if (!hasUsableCandidate) {
+              post('error', { message: `Generated WebRTC offer has no usable ICE candidate. Candidate count: ${candidates.length}` });
+              return;
+            }
+            post('offer', { sdp, mLines, hasTrailingNewline: sdp.endsWith('\\n'), candidateCount: candidates.length });
           } catch (error) {
             post('error', { message: error.message || String(error) });
           }
         }
 
+        async function waitForFrame(video) {
+          const deadline = Date.now() + 25000;
+          while (Date.now() < deadline) {
+            if (video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2) {
+              post('frame', { width: video.videoWidth, height: video.videoHeight });
+              return;
+            }
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          post('error', { message: `Timed out waiting for decoded WebRTC video. readyState=${video.readyState}, size=${video.videoWidth}x${video.videoHeight}` });
+        }
+
         function waitForIceGatheringComplete() {
           if (pc.iceGatheringState === 'complete') return Promise.resolve();
           return new Promise(resolve => {
-            const timeout = setTimeout(resolve, 3000);
+            const timeout = setTimeout(resolve, 10000);
             pc.addEventListener('icegatheringstatechange', () => {
               if (pc.iceGatheringState === 'complete') {
                 clearTimeout(timeout);
@@ -2757,8 +3282,8 @@ enum IntegrationSmokeTests {
         }
 
         let selected = CameraSelectionLogic.selectedCameraId(currentId: "missing", cameras: streamable)
-        guard selected == streamable[0].id else {
-            fputs("Default camera selection did not choose the first streamable camera.\n", stderr)
+        guard selected.isEmpty else {
+            fputs("Missing camera selection should not auto-start the first streamable camera.\n", stderr)
             return 1
         }
 
@@ -2955,39 +3480,39 @@ enum CredentialedNestSmokeTest {
     private static func runWebRTCSmoke(camera: GoogleCamera, accessToken: String) -> Int32 {
         print("Requesting real WebRTC stream from Google...")
 
-        let semaphore = DispatchSemaphore(value: 0)
         final class Box {
             var result: Int32 = 1
             var session: CredentialedWebRTCSmokeSession?
+            var didFinish = false
         }
         let box = Box()
 
-        let start = {
-            box.session = CredentialedWebRTCSmokeSession(camera: camera, accessToken: accessToken) { result in
+        box.session = CredentialedWebRTCSmokeSession(camera: camera, accessToken: accessToken) { result in
+            DispatchQueue.main.async {
+                guard !box.didFinish else { return }
+                box.didFinish = true
                 box.result = result
-                semaphore.signal()
-            }
-            box.session?.start()
-        }
-
-        if Thread.isMainThread {
-            start()
-        } else {
-            DispatchQueue.main.async(execute: start)
-        }
-
-        let deadline = Date().addingTimeInterval(35)
-        while Date() < deadline {
-            if semaphore.wait(timeout: .now()) == .success {
                 box.session?.stop()
-                return box.result
+                NSApp.stop(nil)
             }
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
 
-        box.session?.stop()
-        fputs("Timed out waiting for real Google WebRTC video media.\n", stderr)
-        return 1
+        box.session?.start()
+        Timer.scheduledTimer(withTimeInterval: 35, repeats: false) { _ in
+            guard !box.didFinish else { return }
+            box.didFinish = true
+            fputs("Timed out waiting for real Google WebRTC video media.\n", stderr)
+            box.session?.stop()
+            NSApp.stop(nil)
+        }
+
+        NSApp.run()
+
+        if let event = NSApp.currentEvent {
+            NSApp.postEvent(event, atStart: true)
+        }
+
+        return box.result
     }
 
     private static func decodeFrame(from url: URL, label: String) -> Int32 {
@@ -3267,7 +3792,7 @@ enum CredentialedNestSmokeTest {
     }
 }
 
-final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler {
+final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private let camera: GoogleCamera
     private let accessToken: String
     private let completion: (Int32) -> Void
@@ -3288,6 +3813,7 @@ final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler {
 
         super.init()
         contentController.add(self, name: "native")
+        webView.navigationDelegate = self
     }
 
     func start() {
@@ -3308,6 +3834,10 @@ final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler {
         switch type {
         case "offer":
             guard let sdp = body["sdp"] as? String else { return }
+            let mLines = body["mLines"] as? String ?? "unknown"
+            let hasTrailingNewline = body["hasTrailingNewline"] as? Bool ?? false
+            let candidateCount = body["candidateCount"] as? Int ?? 0
+            print("WebRTC: created offer. m-lines=\(mLines), candidates=\(candidateCount), trailingNewline=\(hasTrailingNewline ? "yes" : "no"), bytes=\(sdp.utf8.count)")
             requestAnswer(offerSdp: sdp)
         case "status":
             if let message = body["message"] as? String {
@@ -3327,7 +3857,22 @@ final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler {
         }
     }
 
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        print("WebRTC: engine loaded.")
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        fputs("WebRTC engine failed to load: \(error.localizedDescription)\n", stderr)
+        finish(1)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        fputs("WebRTC engine failed to start: \(error.localizedDescription)\n", stderr)
+        finish(1)
+    }
+
     private func requestAnswer(offerSdp: String) {
+        print("Calling Google GenerateWebRtcStream...")
         DispatchQueue.global(qos: .userInitiated).async {
             let result = CredentialedNestSmokeTest.executeStreamCommand(
                 camera: self.camera,
@@ -3341,6 +3886,7 @@ final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler {
                 case .success(let data):
                     do {
                         let response = try JSONDecoder().decode(GenerateWebRTCStreamResponse.self, from: data)
+                        print("Google returned WebRTC answer. Applying SDP...")
                         self.apply(answerSdp: response.results.answerSdp)
                     } catch {
                         fputs("Failed to parse Google WebRTC response: \(error.localizedDescription)\n", stderr)
@@ -3387,12 +3933,15 @@ final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler {
 
         async function start() {
           try {
+            post('status', { message: 'Starting WebRTC engine...' });
             if (!window.RTCPeerConnection) {
               post('error', { message: 'WKWebView does not expose RTCPeerConnection on this macOS build.' });
               return;
             }
 
-            pc = new RTCPeerConnection({ iceServers: [] });
+            pc = new RTCPeerConnection({
+              iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
             pc.ontrack = event => {
               const [stream] = event.streams;
               if (stream) {
@@ -3412,7 +3961,19 @@ final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler {
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
             await waitForIceGatheringComplete();
-            post('offer', { sdp: pc.localDescription.sdp });
+            const sdp = pc.localDescription.sdp.endsWith('\\n') ? pc.localDescription.sdp : pc.localDescription.sdp + '\\r\\n';
+            const mLines = [...sdp.matchAll(/^m=([^\\s]+)/gm)].map(match => match[1]).join(',');
+            const candidates = [...sdp.matchAll(/^a=candidate:(.+)$/gm)].map(match => match[1]);
+            const hasUsableCandidate = candidates.some(candidate => !candidate.includes(' 0.0.0.0 ') && !candidate.includes(' IP4 0.0.0.0'));
+            if (mLines !== 'audio,video,application') {
+              post('error', { message: `Generated WebRTC offer does not match Google's required m-line order. Got: ${mLines || 'none'}` });
+              return;
+            }
+            if (!hasUsableCandidate) {
+              post('error', { message: `Generated WebRTC offer has no usable ICE candidate. Candidate count: ${candidates.length}` });
+              return;
+            }
+            post('offer', { sdp, mLines, hasTrailingNewline: sdp.endsWith('\\n'), candidateCount: candidates.length });
           } catch (error) {
             post('error', { message: error.message || String(error) });
           }
@@ -3433,7 +3994,7 @@ final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler {
         function waitForIceGatheringComplete() {
           if (pc.iceGatheringState === 'complete') return Promise.resolve();
           return new Promise(resolve => {
-            const timeout = setTimeout(resolve, 3000);
+            const timeout = setTimeout(resolve, 10000);
             pc.addEventListener('icegatheringstatechange', () => {
               if (pc.iceGatheringState === 'complete') {
                 clearTimeout(timeout);
