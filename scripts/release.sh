@@ -43,7 +43,10 @@ test -x "${PACKAGE_CHECK_DIR}/expanded/Scripts/preinstall"
 test -x "${PACKAGE_CHECK_DIR}/expanded/Scripts/postinstall"
 grep -q 'brew.*install ffmpeg' "${PACKAGE_CHECK_DIR}/expanded/Scripts/preinstall"
 grep -q 'go2rtc-patched' "${PACKAGE_CHECK_DIR}/expanded/Scripts/postinstall"
-shasum -a 256 "${PACKAGE_PATH}" > "${CHECKSUM_PATH}"
+(
+    cd "$(dirname "${PACKAGE_PATH}")"
+    shasum -a 256 "$(basename "${PACKAGE_PATH}")"
+) > "${CHECKSUM_PATH}"
 
 echo "Release package ready: ${PACKAGE_PATH}"
 echo "Release checksum ready: ${CHECKSUM_PATH}"
