@@ -38,9 +38,15 @@ xcrun swift \
     "${REPO_DIR}/scripts/widget_render_smoke.swift" \
     "${REPO_DIR}/Assets/AppIcon.png"
 
+"${REPO_DIR}/scripts/widget_e2e_smoke.sh"
+
 pkgutil --payload-files "${PACKAGE_PATH}" | grep -q './Applications/GoogleHomeCameraWidget.app$'
 pkgutil --payload-files "${PACKAGE_PATH}" | grep -q './Applications/GoogleHomeCameraWidget.app/Contents/PlugIns/GoogleHomeCameraWidgetExtension.appex$'
-grep -q 'CameraSelectionEntity' "${REPO_DIR}/build/GoogleHomeCameraWidget.app/Contents/Resources/Metadata.appintents/extract.actionsdata"
+ENTITY_IDENTIFIER='CameraSelectionEntity'
+HOST_INTENTS_METADATA="${REPO_DIR}/build/GoogleHomeCameraWidget.app/Contents/Resources/Metadata.appintents/extract.actionsdata"
+EXTENSION_INTENTS_METADATA="${REPO_DIR}/build/GoogleHomeCameraWidget.app/Contents/PlugIns/GoogleHomeCameraWidgetExtension.appex/Contents/Resources/Metadata.appintents/extract.actionsdata"
+test "$(plutil -extract actions.CameraSnapshotConfiguration.parameters.0.valueType.entity.wrapper.typeName raw "${HOST_INTENTS_METADATA}")" = "${ENTITY_IDENTIFIER}"
+test "$(plutil -extract actions.CameraSnapshotConfiguration.parameters.0.valueType.entity.wrapper.typeName raw "${EXTENSION_INTENTS_METADATA}")" = "${ENTITY_IDENTIFIER}"
 
 PACKAGE_CHECK_DIR="$(mktemp -d)"
 trap 'rm -rf "${PACKAGE_CHECK_DIR}"' EXIT

@@ -1,11 +1,16 @@
-# 0.1.5
+# 0.1.6
 
 ## Fixed
 
-- Camera entities are now registered in the host app's App Intents metadata so WidgetKit can restore a selected camera instead of resolving it to `nil`.
-- Camera snapshots now use macOS 26's desaturated accented rendering instead of appearing as solid white rectangles.
-- Snapshot PNG data is eagerly decoded into stable bitmap content before WidgetKit renders the timeline entry.
-- Widget snapshot loading now records useful decode and file-access diagnostics in the system log.
+- The host app and WidgetKit extension now share one explicit persistent App Entity identifier, allowing WidgetKit to restore the camera selected in **Edit Widget** instead of resolving it to `nil`.
+- Camera photographs use full-color widget rendering so macOS 26 accented mode no longer collapses frames into a uniform black or white field.
+- Installer upgrades terminate stale widget-extension processes so macOS loads the newly installed extension binary immediately.
+
+## Verification
+
+- Added an end-to-end widget smoke test that reads the real camera catalog, selects a camera with an existing Nest snapshot, round-trips the App Entity identifier, builds the actual timeline entry, and renders the actual widget view.
+- The test rejects image-less and uniform renders and writes `build/widget-e2e-smoke.png` for visual inspection.
+- Release builds verify matching App Intents metadata in both the host app and widget extension.
 
 ## Requirements And Limitations
 

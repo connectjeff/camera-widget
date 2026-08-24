@@ -7,7 +7,7 @@ APP_NAME="GoogleHomeCameraWidget"
 
 cd "${REPO_DIR}"
 
-DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" swift build -c release
+DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" swift build --disable-sandbox -c release
 
 ".build/release/${APP_NAME}" --smoke-test
 ".build/release/${APP_NAME}" --video-smoke-test
@@ -16,6 +16,8 @@ xcrun swift \
     -module-cache-path "${REPO_DIR}/build/WidgetRenderModuleCache" \
     "${REPO_DIR}/scripts/widget_render_smoke.swift" \
     "${REPO_DIR}/Assets/AppIcon.png"
+
+"${REPO_DIR}/scripts/widget_e2e_smoke.sh"
 
 curl -L --fail --silent --show-error --max-time 10 \
     --range 0-512 \

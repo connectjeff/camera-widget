@@ -121,6 +121,8 @@ scripts/integration_smoke.sh
 
 The smoke script builds the app, verifies streamable-camera selection rules using mock camera data, and launches the app briefly with `CAMERA_WIDGET_USE_MOCK_CAMERAS=1` to catch immediate startup crashes without requiring Google credentials.
 
+It also runs `scripts/widget_e2e_smoke.sh` against the current real camera catalog and cached Nest snapshots. That check round-trips a selected App Entity, builds the same timeline entry used by WidgetKit, renders the actual widget view in accented mode, rejects empty or uniform image output, and writes `build/widget-e2e-smoke.png` for inspection. It does not install the app or modify desktop widgets.
+
 It also runs the binary's video decode check:
 
 ```bash
@@ -148,7 +150,7 @@ To build a macOS installer package that installs the app into `/Applications` an
 
 ```bash
 ./build.sh --pkg
-sudo installer -pkg build/GoogleHomeCameraWidget-0.1.5.pkg -target /
+sudo installer -pkg build/GoogleHomeCameraWidget-0.1.6.pkg -target /
 open /Applications/GoogleHomeCameraWidget.app
 ```
 
@@ -161,7 +163,7 @@ See [RELEASE.md](RELEASE.md) for package verification and GitHub release publish
 ## First Run
 
 1. Confirm `Config/oauth2.local.json` exists and has your client ID and Device Access project ID.
-2. Install `build/GoogleHomeCameraWidget-0.1.5.pkg` for the system `/Applications` install that registers the desktop widget.
+2. Install `build/GoogleHomeCameraWidget-0.1.6.pkg` for the system `/Applications` install that registers the desktop widget.
 3. Open `/Applications/GoogleHomeCameraWidget.app`.
 4. Click **Sign In with Google**.
 5. Complete Google's Partner Connections Manager flow and grant camera access.

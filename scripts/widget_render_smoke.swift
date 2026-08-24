@@ -18,7 +18,7 @@ guard let source = CGImageSourceCreateWithData(data as CFData, nil),
 func verifyAccentedRender(_ image: CGImage) {
     let content = Image(decorative: image, scale: 1, orientation: .up)
         .resizable()
-        .widgetAccentedRenderingMode(.desaturated)
+        .widgetAccentedRenderingMode(.fullColor)
         .aspectRatio(contentMode: .fill)
         .frame(width: 240, height: 160)
         .clipped()

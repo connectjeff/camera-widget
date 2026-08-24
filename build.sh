@@ -6,7 +6,7 @@ EXTENSION_NAME="GoogleHomeCameraWidgetExtension"
 BUNDLE_NAME="${APP_NAME}.app"
 BUNDLE_ID="com.jeffalderson.google-home-camera-widget"
 EXTENSION_BUNDLE_ID="${BUNDLE_ID}.snapshot-widget"
-VERSION="0.1.5"
+VERSION="0.1.6"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 APP_DIR="${BUILD_DIR}/${BUNDLE_NAME}"
@@ -116,6 +116,7 @@ if [[ "\${CONSOLE_USER}" != "root" && "\${CONSOLE_USER}" != "loginwindow" ]]; th
         /bin/launchctl asuser "\${CONSOLE_UID}" /usr/bin/sudo -u "\${CONSOLE_USER}" /usr/bin/pluginkit -e use -i "\${EXTENSION_BUNDLE_ID}" >/dev/null 2>&1 || true
     fi
     /bin/launchctl asuser "\${CONSOLE_UID}" /usr/bin/sudo -u "\${CONSOLE_USER}" /usr/bin/killall WidgetKitExtensionHost >/dev/null 2>&1 || true
+    /bin/launchctl asuser "\${CONSOLE_UID}" /usr/bin/sudo -u "\${CONSOLE_USER}" /usr/bin/killall "${EXTENSION_NAME}" >/dev/null 2>&1 || true
 fi
 exit 0
 SCRIPT

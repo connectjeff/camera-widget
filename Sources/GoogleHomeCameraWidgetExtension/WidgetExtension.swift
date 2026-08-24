@@ -6,7 +6,7 @@ import OSLog
 import SwiftUI
 import WidgetKit
 
-private enum SnapshotStore {
+enum SnapshotStore {
     private static let logger = Logger(subsystem: "com.jeffalderson.google-home-camera-widget.snapshot-widget", category: "SnapshotStore")
 
     // Widget extensions get a containerized Foundation home directory. The app
@@ -97,7 +97,7 @@ private enum SnapshotStore {
     }
 }
 
-private struct CameraCatalogEntry: Codable, Identifiable, Hashable {
+struct CameraCatalogEntry: Codable, Identifiable, Hashable {
     let id: String
     let cameraName: String
     let homeName: String
@@ -111,7 +111,7 @@ private struct CameraCatalogEntry: Codable, Identifiable, Hashable {
     }
 }
 
-private struct SnapshotMetadata: Decodable {
+struct SnapshotMetadata: Decodable {
     let cameraId: String
     let cameraName: String
     let homeName: String
@@ -119,7 +119,7 @@ private struct SnapshotMetadata: Decodable {
     let updatedAt: Date
 }
 
-private struct CameraSnapshot {
+struct CameraSnapshot {
     let image: CGImage?
     let cameraName: String
     let homeName: String?
@@ -136,6 +136,7 @@ private struct CameraSnapshot {
 }
 
 struct CameraSelectionEntity: AppEntity {
+    static let persistentIdentifier = "CameraSelectionEntity"
     static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Camera")
     static let defaultQuery = CameraSelectionQuery()
 
@@ -169,15 +170,31 @@ struct CameraSnapshotConfiguration: WidgetConfigurationIntent {
 
     @Parameter(title: "Camera")
     var camera: CameraSelectionEntity?
+
+    init() {
+        camera = nil
+    }
+
+    init(camera: CameraSelectionEntity?) {
+        self.camera = camera
+    }
 }
 
-private struct CameraSnapshotEntry: TimelineEntry {
+struct CameraSnapshotEntry: TimelineEntry {
     let date: Date
     let configuration: CameraSnapshotConfiguration
     let snapshot: CameraSnapshot
 }
 
-private struct CameraSnapshotProvider: AppIntentTimelineProvider {
+struct CameraSnapshotProvider: AppIntentTimelineProvider {
+    static func entry(for configuration: CameraSnapshotConfiguration, date: Date = Date()) -> CameraSnapshotEntry {
+        CameraSnapshotEntry(
+            date: date,
+            configuration: configuration,
+            snapshot: SnapshotStore.load(cameraId: configuration.camera?.id)
+        )
+    }
+
     func placeholder(in context: Context) -> CameraSnapshotEntry {
         CameraSnapshotEntry(
             date: Date(),
@@ -187,17 +204,17 @@ private struct CameraSnapshotProvider: AppIntentTimelineProvider {
     }
 
     func snapshot(for configuration: CameraSnapshotConfiguration, in context: Context) async -> CameraSnapshotEntry {
-        CameraSnapshotEntry(date: Date(), configuration: configuration, snapshot: SnapshotStore.load(cameraId: configuration.camera?.id))
+        Self.entry(for: configuration)
     }
 
     func timeline(for configuration: CameraSnapshotConfiguration, in context: Context) async -> Timeline<CameraSnapshotEntry> {
         let now = Date()
-        let entry = CameraSnapshotEntry(date: now, configuration: configuration, snapshot: SnapshotStore.load(cameraId: configuration.camera?.id))
+        let entry = Self.entry(for: configuration, date: now)
         return Timeline(entries: [entry], policy: .after(now.addingTimeInterval(60)))
     }
 }
 
-private struct CameraSnapshotWidgetView: View {
+struct CameraSnapshotWidgetView: View {
     let entry: CameraSnapshotEntry
 
     var body: some View {
@@ -207,7 +224,7 @@ private struct CameraSnapshotWidgetView: View {
             if let image = entry.snapshot.image {
                 Image(decorative: image, scale: 1, orientation: .up)
                     .resizable()
-                    .widgetAccentedRenderingMode(.desaturated)
+                    .widgetAccentedRenderingMode(.fullColor)
                     .aspectRatio(contentMode: .fill)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
@@ -276,9 +293,11 @@ private struct GoogleHomeCameraSnapshotWidget: Widget {
     }
 }
 
+#if !WIDGET_E2E_TEST
 @main
 private struct GoogleHomeCameraWidgetBundle: WidgetBundle {
     var body: some Widget {
         GoogleHomeCameraSnapshotWidget()
     }
 }
+#endif

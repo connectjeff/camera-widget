@@ -18,6 +18,7 @@ private enum HostWidgetCameraCatalog {
 }
 
 struct CameraSelectionEntity: AppEntity {
+    static let persistentIdentifier = "CameraSelectionEntity"
     static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Camera")
     static let defaultQuery = CameraSelectionQuery()
 
