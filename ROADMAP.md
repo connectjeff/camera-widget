@@ -12,7 +12,7 @@ Status:
 - Streamable-camera selection across multiple homes with room labels.
 - Focused single-camera live view that remembers the last selection.
 - RTSP and WebRTC stream requests through the local go2rtc bridge.
-- Live frame rendering with visible connection progress.
+- Full-motion go2rtc WebRTC rendering with visible connection progress, measured decoded-frame callbacks, recovery, and JPEG fallback.
 - Compact floating window mode.
 - Runs a serialized snapshot scheduler with stable per-camera bridge sources and a target 60-second cycle.
 - System `/Applications` installer package through `build.sh --pkg`.

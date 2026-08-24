@@ -6,7 +6,7 @@ Native macOS apps and companion capabilities for viewing and sharing Google Nest
 - **Nest Camera Snapshot Widget**: a configurable WidgetKit widget where each widget instance can show a different camera's latest snapshot.
 - **Nest Broadcast Bridge**: a selected-camera broadcast surface for stream/conference workflows.
 
-The viewer app handles Google OAuth through Partner Connections Manager, stores tokens in macOS Keychain, discovers authorized SDM cameras across homes, and presents a focused single-camera live viewer. It requests RTSP streams for cameras that report RTSP support and attempts WebRTC playback for cameras that report WebRTC support.
+The viewer app handles Google OAuth through Partner Connections Manager, stores tokens in macOS Keychain, discovers authorized SDM cameras across homes, and presents a focused single-camera live viewer. RTSP cameras use native AVKit playback. WebRTC cameras use the same full-motion go2rtc WebRTC renderer proven by the OBS output, with JPEG/MJPEG retained only as an automatic compatibility fallback.
 
 The widget app is a configurable snapshot surface. After the viewer discovers cameras, the widget exposes those cameras in the standard **Edit Widget** camera picker. You can add one widget per camera. While the viewer app is running, an independent serialized scheduler keeps per-camera snapshot files fresh without interrupting the selected live preview.
 
@@ -23,6 +23,7 @@ The broadcast bridge exposes a stable localhost Browser Source for OBS and a dir
 - RTSP stream command: implemented
 - RTSP playback attempt with AVKit: implemented
 - Google Nest WebRTC playback through the local go2rtc bridge: implemented
+- Full-motion WebRTC playback in viewer and broadcast windows: implemented
 - Compact floating viewer mode: implemented
 - WidgetKit snapshot widget with per-widget camera configuration: implemented
 - Per-camera snapshot files for widget instances: implemented
@@ -125,6 +126,15 @@ The smoke script builds the app and verifies streamable-camera selection rules, 
 
 It also runs `scripts/widget_e2e_smoke.sh` against the current real camera catalog and cached Nest snapshots. That check verifies a dynamically labeled primitive camera option, persists its camera ID into the widget configuration, builds the same timeline entry used by WidgetKit, renders the actual widget view in accented mode, rejects empty or uniform image output, and writes `build/widget-e2e-smoke.png` for inspection. It does not install the app or modify desktop widgets.
 
+To exercise the exact WebKit/go2rtc renderer against an already active local camera source without opening a visible app window:
+
+```bash
+CAMERA_WIDGET_SMOKE_SOURCE_ID=camera_SAFE_HASH \
+  .build/release/GoogleHomeCameraWidget --go2rtc-player-smoke-test
+```
+
+The test requires advancing decoded video and reports the offscreen frame rate. macOS may heavily throttle a hidden WebKit view, so use the visible app and OBS for frame-rate acceptance.
+
 After selecting a camera in Broadcast Bridge, run the credentialed broadcast check:
 
 ```bash
@@ -152,7 +162,7 @@ To build a macOS installer package that installs the app into `/Applications` an
 
 ```bash
 ./build.sh --pkg
-sudo installer -pkg build/GoogleHomeCameraWidget-0.2.0.pkg -target /
+sudo installer -pkg build/GoogleHomeCameraWidget-0.2.1.pkg -target /
 open /Applications/GoogleHomeCameraWidget.app
 ```
 
@@ -165,7 +175,7 @@ See [RELEASE.md](RELEASE.md) for package verification and GitHub release publish
 ## First Run
 
 1. Confirm `Config/oauth2.local.json` exists and has your client ID and Device Access project ID.
-2. Install `build/GoogleHomeCameraWidget-0.2.0.pkg` for the system `/Applications` install that registers the desktop widget.
+2. Install `build/GoogleHomeCameraWidget-0.2.1.pkg` for the system `/Applications` install that registers the desktop widget.
 3. Open `/Applications/GoogleHomeCameraWidget.app`.
 4. Click **Sign In with Google**.
 5. Complete Google's Partner Connections Manager flow and grant camera access.

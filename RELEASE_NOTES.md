@@ -1,7 +1,13 @@
-# 0.2.0
+# 0.2.1
 
 ## Fixed
 
+- Replaced the slow JPEG/MJPEG app preview with the same direct go2rtc WebRTC renderer used by the smooth OBS source. Viewer, Broadcast Bridge, and floating broadcast windows now render advancing video at the camera/WebKit-supported frame rate.
+- Added automatic first-frame detection, measured FPS updates, one WebRTC recovery attempt, and a JPEG compatibility fallback if full-motion playback cannot start.
+- Prioritized the remembered foreground camera when the snapshot scheduler initializes so the selected stream warms first.
+- Kept an already-open broadcast window synchronized when the Broadcast Bridge camera selection changes.
+- Fixed desktop-widget clicks so they always open Viewer and select that widget's exact camera, even when Broadcast was the app's last-used section.
+- Added a headless real-stream WebKit test that requires advancing decoded camera video and reports its offscreen FPS. Visible FPS remains source- and system-controlled because macOS throttles hidden WebKit rendering.
 - Added a stable, credential-free localhost Browser Source for OBS. Configure the URL once; selecting another camera in Broadcast Bridge updates the existing OBS source automatically.
 - Added a direct MPEG-TS fallback, an in-app live-frame readiness check, and a credentialed smoke test that decodes 30 real camera frames.
 - Added direct OBS launch and source-copy controls plus an end-to-end OBS, Microsoft Teams, and Zoom acceptance plan.

@@ -149,7 +149,12 @@ enum CameraSelectionLogic {
 enum CameraDeepLink {
     static let scheme = "googlehomecamerawidget"
 
-    static func cameraId(from url: URL) -> String? {
+    struct Destination: Equatable {
+        let surface: AppSurface
+        let cameraId: String
+    }
+
+    static func destination(from url: URL) -> Destination? {
         guard url.scheme?.lowercased() == scheme,
               url.host?.lowercased() == "camera",
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -157,7 +162,11 @@ enum CameraDeepLink {
               !cameraId.isEmpty else {
             return nil
         }
-        return cameraId
+        return Destination(surface: .viewer, cameraId: cameraId)
+    }
+
+    static func cameraId(from url: URL) -> String? {
+        destination(from: url)?.cameraId
     }
 }
 
@@ -631,7 +640,17 @@ final class SnapshotScheduler: ObservableObject {
     private var generation = 0
 
     func start(cameras: [GoogleCamera], authManager: AuthManager) {
-        let streamable = cameras.filter { $0.supportsRTSP || $0.supportsWebRTC }
+        var streamable = cameras.filter { $0.supportsRTSP || $0.supportsWebRTC }
+        let defaults = UserDefaults.standard
+        let selectedSurface = defaults.string(forKey: "selectedAppSurface") ?? AppSurface.viewer.rawValue
+        let preferredCameraId = selectedSurface == AppSurface.broadcast.rawValue
+            ? defaults.string(forKey: "broadcastCameraId")
+            : defaults.string(forKey: "viewerLastSelectedCameraId")
+        if let preferredCameraId,
+           let preferredIndex = streamable.firstIndex(where: { $0.id == preferredCameraId }),
+           preferredIndex > 0 {
+            streamable.insert(streamable.remove(at: preferredIndex), at: 0)
+        }
         let cameraIdsChanged = self.cameras.map(\.id) != streamable.map(\.id)
         self.cameras = streamable
         self.authManager = authManager
@@ -845,7 +864,14 @@ final class BroadcastSourceServer {
     static let shared = BroadcastSourceServer()
 
     private let queue = DispatchQueue(label: "com.jeffalderson.google-home-camera-widget.broadcast-source")
-    private let port = NWEndpoint.Port(rawValue: 11985)!
+    private let port: NWEndpoint.Port = {
+        if let value = ProcessInfo.processInfo.environment["CAMERA_WIDGET_BROADCAST_PORT"],
+           let rawPort = UInt16(value),
+           let port = NWEndpoint.Port(rawValue: rawPort) {
+            return port
+        }
+        return NWEndpoint.Port(rawValue: 11985)!
+    }()
     private var listener: NWListener?
     private var sourceId: String?
     private var revision = 0
@@ -993,10 +1019,6 @@ final class BroadcastBridgeController: ObservableObject {
     }
 
     func openWindow(camera: GoogleCamera, authManager: AuthManager) {
-        let model = model(for: camera)
-        let rootView = BroadcastFeedWindowView(camera: camera, model: model, authManager: authManager)
-        let hostingView = NSHostingView(rootView: rootView)
-
         let outputWindow: NSWindow
         if let window {
             outputWindow = window
@@ -1013,13 +1035,10 @@ final class BroadcastBridgeController: ObservableObject {
             window = outputWindow
         }
 
-        outputWindow.title = "Nest Broadcast Feed - \(camera.displayName)"
-        outputWindow.contentAspectRatio = NSSize(width: 16, height: 9)
-        outputWindow.contentView = hostingView
+        updateWindow(outputWindow, camera: camera, authManager: authManager)
         outputWindow.center()
         outputWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        model.start(authManager: authManager)
     }
 
     func prepareOutput(camera: GoogleCamera, authManager: AuthManager) {
@@ -1034,6 +1053,9 @@ final class BroadcastBridgeController: ObservableObject {
             )
             output = descriptor
             outputStatus = "Testing live output for \(camera.displayName)..."
+            if let window, window.isVisible {
+                updateWindow(window, camera: camera, authManager: authManager)
+            }
             verify(descriptor: descriptor, cameraName: camera.displayName)
         } catch {
             output = nil
@@ -1090,6 +1112,15 @@ final class BroadcastBridgeController: ObservableObject {
                 }
             }
         }.resume()
+    }
+
+    private func updateWindow(_ window: NSWindow, camera: GoogleCamera, authManager: AuthManager) {
+        let model = model(for: camera)
+        let rootView = BroadcastFeedWindowView(camera: camera, model: model, authManager: authManager)
+        window.title = "Nest Broadcast Feed - \(camera.displayName)"
+        window.contentAspectRatio = NSSize(width: 16, height: 9)
+        window.contentView = NSHostingView(rootView: rootView)
+        model.start(authManager: authManager)
     }
 
     private func copy(_ value: String) {
@@ -1282,7 +1313,7 @@ final class Go2RTCBridgeManager {
     }
 
     private func playerURL(sourceId: String) -> URL {
-        URL(string: "http://127.0.0.1:11984/stream.html?src=\(sourceId)&mode=webrtc&_=\(playerGeneration)")!
+        URL(string: "http://127.0.0.1:11984/stream.html?src=\(sourceId)&mode=webrtc&width=100%25&background=true&_=\(playerGeneration)")!
     }
 
     private func frameURL(sourceId: String) -> URL {
@@ -1353,6 +1384,7 @@ final class LiveFeedModel: ObservableObject {
     @Published var status: String?
     @Published var errorMessage: String?
     @Published var hasFrame = false
+    @Published var usesImageFallback = false
 
     private(set) var camera: GoogleCamera
     private var isStarted = false
@@ -1378,6 +1410,7 @@ final class LiveFeedModel: ObservableObject {
         isStarted = true
         errorMessage = nil
         hasFrame = false
+        usesImageFallback = false
 
         if Constants.mockMode {
             status = "Mock stream ready."
@@ -1415,6 +1448,7 @@ final class LiveFeedModel: ObservableObject {
         status = nil
         errorMessage = nil
         hasFrame = false
+        usesImageFallback = false
     }
 
     private func startGo2RTCBridge(authManager: AuthManager) {
@@ -1428,6 +1462,25 @@ final class LiveFeedModel: ObservableObject {
             status = nil
             errorMessage = "Local WebRTC bridge failed: \(error.localizedDescription)"
         }
+    }
+
+    func receivedWebRTCFrame(width: Int, height: Int) {
+        hasFrame = true
+        errorMessage = nil
+        status = "Live WebRTC - \(width)x\(height)"
+    }
+
+    func updateWebRTCFPS(_ fps: Double) {
+        guard hasFrame, !usesImageFallback else { return }
+        status = String(format: "Live WebRTC - %.0f fps", fps)
+    }
+
+    func useImageFallback(reason: String) {
+        guard !usesImageFallback else { return }
+        usesImageFallback = true
+        hasFrame = false
+        status = "WebRTC unavailable; using frame fallback"
+        errorMessage = reason
     }
 
     func generateWebRTC(offerSdp: String, authManager: AuthManager) {
@@ -2045,9 +2098,10 @@ struct CameraView: View {
             }
         }
         .onOpenURL { url in
-            guard let cameraId = CameraDeepLink.cameraId(from: url) else { return }
+            guard let destination = CameraDeepLink.destination(from: url) else { return }
             liveFeedCoordinator.reset()
-            selectedCameraId = cameraId
+            selectedSurfaceRawValue = destination.surface.rawValue
+            selectedCameraId = destination.cameraId
             if authManager.isAuthenticated && cameraManager.cameras.isEmpty {
                 cameraManager.loadCameras(authManager: authManager)
             }
@@ -2604,7 +2658,8 @@ struct BroadcastBridgeView: View {
                         camera: camera,
                         model: controller.model(for: camera),
                         authManager: authManager,
-                        isZoomed: true
+                        isZoomed: true,
+                        showsMetadata: false
                     )
                     .frame(maxWidth: 960)
                 } else {
@@ -2733,6 +2788,20 @@ struct CameraFeedTile: View {
                 } else if let rtspURL = model.rtspURL {
                     RTSPPlayerView(url: rtspURL)
                         .allowsHitTesting(false)
+                } else if let bridgeURL = model.bridgeURL, !model.usesImageFallback {
+                    Go2RTCWebPlayerView(
+                        url: bridgeURL,
+                        onFrame: { width, height in
+                            model.receivedWebRTCFrame(width: width, height: height)
+                        },
+                        onFPS: { fps in
+                            model.updateWebRTCFPS(fps)
+                        },
+                        onFailure: { message in
+                            model.useImageFallback(reason: message)
+                        }
+                    )
+                    .allowsHitTesting(false)
                 } else if let frameURL = model.frameURL {
                     BridgeFramePlayerView(frameURL: frameURL, mjpegURL: model.mjpegURL) {
                         model.hasFrame = true
@@ -3013,6 +3082,271 @@ final class FrameImageContainerView: NSView {
     required init?(coder: NSCoder) {
         nil
     }
+}
+
+struct Go2RTCWebPlayerView: NSViewRepresentable {
+    let url: URL
+    let onFrame: (Int, Int) -> Void
+    let onFPS: (Double) -> Void
+    let onFailure: (String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onFrame: onFrame, onFPS: onFPS, onFailure: onFailure)
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let contentController = WKUserContentController()
+        contentController.add(context.coordinator, name: "go2rtcPlayer")
+        contentController.addUserScript(WKUserScript(
+            source: Self.monitorScript,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
+
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = contentController
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        configuration.allowsAirPlayForMediaPlayback = false
+
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.setValue(false, forKey: "drawsBackground")
+        context.coordinator.webView = webView
+        context.coordinator.load(url: url)
+        SnapshotSource.shared.view = webView
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.updateCallbacks(onFrame: onFrame, onFPS: onFPS, onFailure: onFailure)
+        context.coordinator.load(url: url)
+        SnapshotSource.shared.view = webView
+    }
+
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.stop()
+        webView.stopLoading()
+        webView.loadHTMLString("", baseURL: nil)
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "go2rtcPlayer")
+        if SnapshotSource.shared.view === webView {
+            SnapshotSource.shared.view = nil
+        }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        weak var webView: WKWebView?
+
+        private var loadedURL: URL?
+        private var watchdog: Timer?
+        private var loadStartedAt = Date()
+        private var lastFrameAt: Date?
+        private var retryCount = 0
+        private var onFrame: (Int, Int) -> Void
+        private var onFPS: (Double) -> Void
+        private var onFailure: (String) -> Void
+
+        init(
+            onFrame: @escaping (Int, Int) -> Void,
+            onFPS: @escaping (Double) -> Void,
+            onFailure: @escaping (String) -> Void
+        ) {
+            self.onFrame = onFrame
+            self.onFPS = onFPS
+            self.onFailure = onFailure
+        }
+
+        func updateCallbacks(
+            onFrame: @escaping (Int, Int) -> Void,
+            onFPS: @escaping (Double) -> Void,
+            onFailure: @escaping (String) -> Void
+        ) {
+            self.onFrame = onFrame
+            self.onFPS = onFPS
+            self.onFailure = onFailure
+        }
+
+        func load(url: URL) {
+            guard loadedURL != url else { return }
+            loadedURL = url
+            retryCount = 0
+            lastFrameAt = nil
+            loadStartedAt = Date()
+            loadCurrentURL()
+            startWatchdog()
+        }
+
+        func stop() {
+            watchdog?.invalidate()
+            watchdog = nil
+            loadedURL = nil
+            lastFrameAt = nil
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any],
+                  let type = body["type"] as? String else {
+                return
+            }
+
+            switch type {
+            case "frame":
+                let width = body["width"] as? Int ?? 0
+                let height = body["height"] as? Int ?? 0
+                lastFrameAt = Date()
+                onFrame(width, height)
+            case "heartbeat":
+                lastFrameAt = Date()
+                if let fps = body["fps"] as? Double, fps > 0 {
+                    onFPS(fps)
+                }
+            case "error":
+                recoverOrFail(body["message"] as? String ?? "The WebRTC player reported an error.")
+            default:
+                break
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            recoverOrFail("WebRTC page failed to load: \(error.localizedDescription)")
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            recoverOrFail("WebRTC page failed to start: \(error.localizedDescription)")
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            recoverOrFail("The WebRTC renderer stopped unexpectedly.")
+        }
+
+        private func loadCurrentURL() {
+            guard let loadedURL, let webView else { return }
+            let request = URLRequest(
+                url: loadedURL,
+                cachePolicy: .returnCacheDataElseLoad,
+                timeoutInterval: 30
+            )
+            webView.load(request)
+        }
+
+        private func startWatchdog() {
+            watchdog?.invalidate()
+            watchdog = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                let reference = self.lastFrameAt ?? self.loadStartedAt
+                let timeout: TimeInterval
+                if self.lastFrameAt != nil {
+                    timeout = 15
+                } else {
+                    timeout = self.retryCount == 0 ? 20 : 15
+                }
+                if Date().timeIntervalSince(reference) > timeout {
+                    self.recoverOrFail("No advancing WebRTC video frames were received.")
+                }
+            }
+        }
+
+        private func recoverOrFail(_ message: String) {
+            guard loadedURL != nil else { return }
+            if retryCount == 0 {
+                retryCount += 1
+                lastFrameAt = nil
+                loadStartedAt = Date()
+                loadCurrentURL()
+                return
+            }
+
+            stop()
+            onFailure("\(message) Switched to the compatible frame renderer.")
+        }
+    }
+
+    private static let monitorScript = #"""
+    (() => {
+      const native = window.webkit && window.webkit.messageHandlers.go2rtcPlayer;
+      if (!native) return;
+
+      const style = document.createElement('style');
+      style.textContent = `
+        html, body, video-stream, video {
+          width: 100% !important;
+          height: 100% !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          background: #000 !important;
+        }
+        body { overflow: hidden !important; display: block !important; }
+        video-stream { display: block !important; }
+        video { object-fit: contain !important; }
+        video-stream .info { display: none !important; }
+        video::-webkit-media-controls { display: none !important; }
+      `;
+      document.head.appendChild(style);
+
+      let attachedVideo = null;
+      let reportedFirstFrame = false;
+      let sampleStartedAt = performance.now();
+      let sampleFrameCount = 0;
+
+      const post = value => native.postMessage(value);
+
+      const observeFrames = video => {
+        const frame = (now, metadata) => {
+          if (video !== attachedVideo) return;
+
+          sampleFrameCount += 1;
+          if (!reportedFirstFrame && video.videoWidth > 0 && video.videoHeight > 0) {
+            reportedFirstFrame = true;
+            post({ type: 'frame', width: video.videoWidth, height: video.videoHeight });
+          }
+
+          const elapsed = now - sampleStartedAt;
+          if (elapsed >= 1000) {
+            post({ type: 'heartbeat', fps: sampleFrameCount * 1000 / elapsed });
+            sampleStartedAt = now;
+            sampleFrameCount = 0;
+          }
+
+          video.requestVideoFrameCallback(frame);
+        };
+        video.requestVideoFrameCallback(frame);
+      };
+
+      const attach = () => {
+        const host = document.querySelector('video-stream');
+        const video = host && host.querySelector('video');
+        if (video && video !== attachedVideo) {
+          attachedVideo = video;
+          reportedFirstFrame = false;
+          sampleStartedAt = performance.now();
+          sampleFrameCount = 0;
+          video.controls = false;
+          video.muted = true;
+          video.playsInline = true;
+          video.autoplay = true;
+          video.style.objectFit = 'contain';
+          video.play().catch(() => {});
+
+          if ('requestVideoFrameCallback' in video) {
+            observeFrames(video);
+          } else {
+            let previousTime = -1;
+            setInterval(() => {
+              if (video !== attachedVideo || video.currentTime === previousTime) return;
+              previousTime = video.currentTime;
+              post({ type: 'heartbeat', fps: 1 });
+              if (!reportedFirstFrame && video.videoWidth > 0 && video.videoHeight > 0) {
+                reportedFirstFrame = true;
+                post({ type: 'frame', width: video.videoWidth, height: video.videoHeight });
+              }
+            }, 250);
+          }
+        }
+        setTimeout(attach, 100);
+      };
+
+      attach();
+    })();
+    """#
 }
 
 struct BridgeFramePlayerView: NSViewRepresentable {
@@ -3605,8 +3939,8 @@ enum IntegrationSmokeTests {
         components.host = "camera"
         components.queryItems = [URLQueryItem(name: "id", value: streamable[1].id)]
         guard let deepLink = components.url,
-              CameraDeepLink.cameraId(from: deepLink) == streamable[1].id,
-              CameraDeepLink.cameraId(from: URL(string: "https://example.com/camera?id=wrong")!) == nil else {
+              CameraDeepLink.destination(from: deepLink) == .init(surface: .viewer, cameraId: streamable[1].id),
+              CameraDeepLink.destination(from: URL(string: "https://example.com/camera?id=wrong")!) == nil else {
             fputs("Camera widget deep-link parsing failed.\n", stderr)
             return 1
         }
@@ -3661,6 +3995,73 @@ enum VideoPreviewSmokeTest {
         }
 
         print("Video preview smoke test passed. AVPlayer decoded a \(Int(frameSize.width))x\(Int(frameSize.height)) frame from the built-in HLS stream.")
+        return 0
+    }
+}
+
+@MainActor
+enum Go2RTCPlayerSmokeTest {
+    static func run() -> Int32 {
+        guard let sourceId = ProcessInfo.processInfo.environment["CAMERA_WIDGET_SMOKE_SOURCE_ID"],
+              sourceId.range(of: #"^camera_[0-9a-f]{16}$"#, options: .regularExpression) != nil,
+              let url = URL(string: "http://127.0.0.1:11984/stream.html?src=\(sourceId)&mode=webrtc&width=100%25&background=true") else {
+            fputs("Set CAMERA_WIDGET_SMOKE_SOURCE_ID to a safe go2rtc camera source ID.\n", stderr)
+            return 2
+        }
+
+        final class ResultBox {
+            var frameSize: CGSize?
+            var maximumFPS = 0.0
+            var failure: String?
+        }
+
+        let result = ResultBox()
+        let minimumFPS = ProcessInfo.processInfo.environment["CAMERA_WIDGET_MIN_SMOKE_FPS"]
+            .flatMap(Double.init) ?? 0.1
+        let player = Go2RTCWebPlayerView(
+            url: url,
+            onFrame: { width, height in
+                result.frameSize = CGSize(width: width, height: height)
+            },
+            onFPS: { fps in
+                result.maximumFPS = max(result.maximumFPS, fps)
+            },
+            onFailure: { message in
+                result.failure = message
+            }
+        )
+        .frame(width: 640, height: 360)
+
+        let app = NSApplication.shared
+        app.setActivationPolicy(.prohibited)
+        let window = NSWindow(
+            contentRect: NSRect(x: -2_000, y: -2_000, width: 640, height: 360),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = NSHostingView(rootView: player)
+        window.orderFrontRegardless()
+
+        let deadline = Date().addingTimeInterval(40)
+        while Date() < deadline, result.failure == nil, result.frameSize == nil || result.maximumFPS < minimumFPS {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        window.orderOut(nil)
+        window.contentView = nil
+
+        if let failure = result.failure {
+            fputs("go2rtc app-player smoke test failed: \(failure)\n", stderr)
+            return 1
+        }
+
+        let measuredFPSText = String(format: "%.1f", result.maximumFPS)
+        guard let frameSize = result.frameSize, result.maximumFPS >= minimumFPS else {
+            fputs("go2rtc app-player smoke test reached only \(measuredFPSText) fps.\n", stderr)
+            return 1
+        }
+
+        print("go2rtc app-player smoke test passed: \(Int(frameSize.width))x\(Int(frameSize.height)) at \(measuredFPSText) fps.")
         return 0
     }
 }
@@ -4394,6 +4795,9 @@ struct GoogleHomeCameraWidgetApp: App {
         }
         if CommandLine.arguments.contains("--broadcast-source-smoke-test") {
             exit(BroadcastSourceServerSmokeTest.run())
+        }
+        if CommandLine.arguments.contains("--go2rtc-player-smoke-test") {
+            exit(Go2RTCPlayerSmokeTest.run())
         }
         if Self.isCredentialedSmokeTest {
             exit(CredentialedNestSmokeTest.run())

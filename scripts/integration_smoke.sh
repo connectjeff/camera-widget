@@ -10,7 +10,7 @@ cd "${REPO_DIR}"
 DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" swift build --disable-sandbox -c release
 
 ".build/release/${APP_NAME}" --smoke-test
-".build/release/${APP_NAME}" --broadcast-source-smoke-test
+CAMERA_WIDGET_BROADCAST_PORT=12985 ".build/release/${APP_NAME}" --broadcast-source-smoke-test
 
 xcrun swift \
     -module-cache-path "${REPO_DIR}/build/WidgetRenderModuleCache" \

@@ -5,7 +5,7 @@ This repository is MIT licensed. It integrates with the third-party software and
 ## Media Software
 
 - [go2rtc](https://github.com/AlexxIT/go2rtc) `1.9.14+dev.c245815.dirty` provides the local Nest WebRTC bridge. An arm64 helper built from commit `c245815` with local Nest fixes is embedded in the app and distributed under go2rtc's MIT license.
-- [FFmpeg](https://ffmpeg.org/) converts H.264 camera frames to JPEG/MJPEG for the viewer and WidgetKit snapshots. FFmpeg is not copied into the app package. The installer checks for it and runs the Homebrew `ffmpeg` formula installation when necessary. FFmpeg has its own LGPL/GPL licensing terms based on the formula's enabled components.
+- [FFmpeg](https://ffmpeg.org/) converts H.264 camera frames to JPEG/MJPEG for WidgetKit snapshots and the app's compatibility fallback. Primary app playback and OBS use full-motion WebRTC. FFmpeg is not copied into the app package. The installer checks for it and runs the Homebrew `ffmpeg` formula installation when necessary. FFmpeg has its own LGPL/GPL licensing terms based on the formula's enabled components.
 - [Homebrew](https://brew.sh/) is used by the installer to provision FFmpeg when it is missing. Homebrew is not bundled. The installer does not bootstrap Homebrew itself; installing a package manager is a separate system-level choice that requires explicit user action.
 
 The runtime also uses macOS system libraries and frameworks supplied by Apple. It has no Swift Package Manager, npm, Python, or separately downloaded runtime-library dependencies.
