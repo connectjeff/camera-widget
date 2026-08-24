@@ -19,7 +19,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./build.sh --pkg
 The package is written to:
 
 ```text
-build/GoogleHomeCameraWidget-0.1.4.pkg
+build/GoogleHomeCameraWidget-0.1.5.pkg
 ```
 
 It installs `GoogleHomeCameraWidget.app` into `/Applications` and runs a postinstall script that registers the app and embedded WidgetKit extension.

@@ -207,7 +207,7 @@ private struct CameraSnapshotWidgetView: View {
             if let image = entry.snapshot.image {
                 Image(decorative: image, scale: 1, orientation: .up)
                     .resizable()
-                    .widgetAccentedRenderingMode(.fullColor)
+                    .widgetAccentedRenderingMode(.desaturated)
                     .aspectRatio(contentMode: .fill)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()

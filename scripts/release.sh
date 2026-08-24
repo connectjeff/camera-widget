@@ -40,6 +40,7 @@ xcrun swift \
 
 pkgutil --payload-files "${PACKAGE_PATH}" | grep -q './Applications/GoogleHomeCameraWidget.app$'
 pkgutil --payload-files "${PACKAGE_PATH}" | grep -q './Applications/GoogleHomeCameraWidget.app/Contents/PlugIns/GoogleHomeCameraWidgetExtension.appex$'
+grep -q 'CameraSelectionEntity' "${REPO_DIR}/build/GoogleHomeCameraWidget.app/Contents/Resources/Metadata.appintents/extract.actionsdata"
 
 PACKAGE_CHECK_DIR="$(mktemp -d)"
 trap 'rm -rf "${PACKAGE_CHECK_DIR}"' EXIT

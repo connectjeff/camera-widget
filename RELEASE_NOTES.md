@@ -1,8 +1,9 @@
-# 0.1.4
+# 0.1.5
 
 ## Fixed
 
-- Camera snapshots now opt into full-color rendering in macOS 26 accented widgets instead of appearing as solid white rectangles.
+- Camera entities are now registered in the host app's App Intents metadata so WidgetKit can restore a selected camera instead of resolving it to `nil`.
+- Camera snapshots now use macOS 26's desaturated accented rendering instead of appearing as solid white rectangles.
 - Snapshot PNG data is eagerly decoded into stable bitmap content before WidgetKit renders the timeline entry.
 - Widget snapshot loading now records useful decode and file-access diagnostics in the system log.
 
