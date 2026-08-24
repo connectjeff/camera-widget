@@ -1,4 +1,3 @@
-import AppIntents
 import AppKit
 import SwiftUI
 import WidgetKit
@@ -6,7 +5,7 @@ import WidgetKit
 enum WidgetSmokeFailure: Error, CustomStringConvertible {
     case noCameras
     case noSnapshot
-    case entityRoundTrip
+    case optionsProvider
     case timelineEntry
     case render
     case uniformRender
@@ -15,7 +14,7 @@ enum WidgetSmokeFailure: Error, CustomStringConvertible {
         switch self {
         case .noCameras: return "The real camera catalog is empty"
         case .noSnapshot: return "No catalog camera has a readable snapshot"
-        case .entityRoundTrip: return "The selected AppEntity identifier did not resolve"
+        case .optionsProvider: return "The camera options provider did not return the selected camera ID"
         case .timelineEntry: return "The timeline entry did not contain the selected camera frame"
         case .render: return "The actual widget view could not be rendered"
         case .uniformRender: return "The actual widget view collapsed to a uniform field"
@@ -27,21 +26,22 @@ enum WidgetSmokeFailure: Error, CustomStringConvertible {
 struct WidgetEndToEndSmoke {
     @MainActor
     static func main() async throws {
-        let query = CameraSelectionQuery()
-        let cameras = try await query.suggestedEntities()
-        guard !cameras.isEmpty else { throw WidgetSmokeFailure.noCameras }
+        let catalog = SnapshotStore.catalog()
+        guard !catalog.isEmpty else { throw WidgetSmokeFailure.noCameras }
 
-        guard let selected = cameras.first(where: { SnapshotStore.load(cameraId: $0.id).image != nil }) else {
+        guard let selected = catalog.first(where: { SnapshotStore.load(cameraId: $0.id).image != nil }) else {
             throw WidgetSmokeFailure.noSnapshot
         }
-        let resolved = try await query.entities(for: [selected.id])
-        guard resolved.count == 1, resolved[0].id == selected.id else {
-            throw WidgetSmokeFailure.entityRoundTrip
+        let options = try await CameraOptionsProvider().results()
+        let optionItems = options.sections.flatMap(\.items)
+        guard let selectedOption = optionItems.first(where: { $0.value == selected.id }),
+              !String(localized: selectedOption.description.title).isEmpty else {
+            throw WidgetSmokeFailure.optionsProvider
         }
 
-        let configuration = CameraSnapshotConfiguration(camera: resolved[0])
+        let configuration = CameraSnapshotConfiguration(cameraId: selected.id)
         let entry = CameraSnapshotProvider.entry(for: configuration)
-        guard entry.configuration.camera?.id == selected.id, entry.snapshot.image != nil else {
+        guard entry.configuration.cameraId == selected.id, entry.snapshot.image != nil else {
             throw WidgetSmokeFailure.timelineEntry
         }
 
@@ -89,10 +89,9 @@ struct WidgetEndToEndSmoke {
         }
         try png.write(to: outputURL, options: .atomic)
 
-        let entityIdentifier = EntityIdentifier(for: resolved[0])
         print("Widget E2E passed")
-        print("Camera: \(resolved[0].title)")
-        print("Entity: \(entityIdentifier)")
+        print("Camera: \(selected.displayName)")
+        print("Configuration camera ID: \(selected.id)")
         print("Frame: \(entry.snapshot.image!.width)x\(entry.snapshot.image!.height)")
         print("Rendered: \(outputURL.path)")
     }

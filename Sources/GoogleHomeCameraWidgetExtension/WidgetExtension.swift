@@ -135,32 +135,17 @@ struct CameraSnapshot {
     }
 }
 
-struct CameraSelectionEntity: AppEntity {
-    static let persistentIdentifier = "CameraSelectionEntity"
-    static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Camera")
-    static let defaultQuery = CameraSelectionQuery()
-
-    let id: String
-    let title: String
-
-    var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(title: "\(title)")
-    }
-}
-
-struct CameraSelectionQuery: EntityQuery {
-    func entities(for identifiers: [CameraSelectionEntity.ID]) async throws -> [CameraSelectionEntity] {
-        SnapshotStore.catalog()
-            .filter { identifiers.contains($0.id) }
-            .map { CameraSelectionEntity(id: $0.id, title: $0.displayName) }
-    }
-
-    func suggestedEntities() async throws -> [CameraSelectionEntity] {
-        SnapshotStore.catalog().map { CameraSelectionEntity(id: $0.id, title: $0.displayName) }
-    }
-
-    func defaultResult() async -> CameraSelectionEntity? {
-        nil
+struct CameraOptionsProvider: DynamicOptionsProvider {
+    func results() async throws -> IntentItemCollection<String> {
+        IntentItemCollection(
+            sections: [
+                IntentItemSection(
+                    items: SnapshotStore.catalog().map { camera in
+                        IntentItem(camera.id, title: "\(camera.displayName)")
+                    }
+                )
+            ]
+        )
     }
 }
 
@@ -168,15 +153,15 @@ struct CameraSnapshotConfiguration: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "Nest Camera"
     static var description = IntentDescription("Choose which Google Nest camera this widget displays.")
 
-    @Parameter(title: "Camera")
-    var camera: CameraSelectionEntity?
+    @Parameter(title: "Camera", optionsProvider: CameraOptionsProvider())
+    var cameraId: String?
 
     init() {
-        camera = nil
+        cameraId = nil
     }
 
-    init(camera: CameraSelectionEntity?) {
-        self.camera = camera
+    init(cameraId: String?) {
+        self.cameraId = cameraId
     }
 }
 
@@ -191,7 +176,7 @@ struct CameraSnapshotProvider: AppIntentTimelineProvider {
         CameraSnapshotEntry(
             date: date,
             configuration: configuration,
-            snapshot: SnapshotStore.load(cameraId: configuration.camera?.id)
+            snapshot: SnapshotStore.load(cameraId: configuration.cameraId)
         )
     }
 
@@ -266,14 +251,14 @@ struct CameraSnapshotWidgetView: View {
             .padding(8)
         }
         .containerBackground(.black, for: .widget)
-        .widgetURL(SnapshotStore.viewerURL(cameraId: entry.configuration.camera?.id))
+        .widgetURL(SnapshotStore.viewerURL(cameraId: entry.configuration.cameraId))
     }
 
     private var emptyMessage: String {
         if SnapshotStore.catalog().isEmpty {
             return "Open the camera viewer and load cameras."
         }
-        if entry.configuration.camera == nil {
+        if entry.configuration.cameraId == nil {
             return "Right-click and choose Edit Widget to select a camera."
         }
         return "Waiting for the next camera snapshot. Keep the camera app open."

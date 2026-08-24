@@ -42,11 +42,14 @@ xcrun swift \
 
 pkgutil --payload-files "${PACKAGE_PATH}" | grep -q './Applications/GoogleHomeCameraWidget.app$'
 pkgutil --payload-files "${PACKAGE_PATH}" | grep -q './Applications/GoogleHomeCameraWidget.app/Contents/PlugIns/GoogleHomeCameraWidgetExtension.appex$'
-ENTITY_IDENTIFIER='CameraSelectionEntity'
-HOST_INTENTS_METADATA="${REPO_DIR}/build/GoogleHomeCameraWidget.app/Contents/Resources/Metadata.appintents/extract.actionsdata"
 EXTENSION_INTENTS_METADATA="${REPO_DIR}/build/GoogleHomeCameraWidget.app/Contents/PlugIns/GoogleHomeCameraWidgetExtension.appex/Contents/Resources/Metadata.appintents/extract.actionsdata"
-test "$(plutil -extract actions.CameraSnapshotConfiguration.parameters.0.valueType.entity.wrapper.typeName raw "${HOST_INTENTS_METADATA}")" = "${ENTITY_IDENTIFIER}"
-test "$(plutil -extract actions.CameraSnapshotConfiguration.parameters.0.valueType.entity.wrapper.typeName raw "${EXTENSION_INTENTS_METADATA}")" = "${ENTITY_IDENTIFIER}"
+test "$(plutil -extract actions.CameraSnapshotConfiguration.parameters.0.name raw "${EXTENSION_INTENTS_METADATA}")" = 'cameraId'
+test "$(plutil -extract actions.CameraSnapshotConfiguration.parameters.0.dynamicOptionsSupport raw "${EXTENSION_INTENTS_METADATA}")" = '1'
+test "$(plutil -extract actions.CameraSnapshotConfiguration.parameters.0.valueType.primitive.wrapper.typeIdentifier raw "${EXTENSION_INTENTS_METADATA}")" = '0'
+if grep -q 'CameraSelectionEntity' "${EXTENSION_INTENTS_METADATA}"; then
+    echo "Widget metadata still contains the removed AppEntity camera selector." >&2
+    exit 1
+fi
 
 PACKAGE_CHECK_DIR="$(mktemp -d)"
 trap 'rm -rf "${PACKAGE_CHECK_DIR}"' EXIT
