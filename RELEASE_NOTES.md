@@ -1,7 +1,8 @@
-# 0.1.8
+# 0.1.9
 
 ## Fixed
 
+- Removed the home, room, and status overlays from camera frames. Widgets now reserve a compact footer below the uncropped image for only the camera name and capture time.
 - Camera snapshots now scale to fit completely inside every widget family without cropping; black letterboxing preserves the camera's aspect ratio when needed.
 - Refresh documentation now distinguishes the companion app's 60-second capture-cycle target from WidgetKit's system-managed display cadence.
 - Replaced the camera `AppEntity` parameter with a primitive camera-ID string backed by a dynamic options provider. Friendly home, room, and camera names still appear in **Edit Widget**, while WidgetKit persists the selected Google camera resource ID directly.

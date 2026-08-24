@@ -203,64 +203,46 @@ struct CameraSnapshotWidgetView: View {
     let entry: CameraSnapshotEntry
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            Color.black
+        VStack(spacing: 0) {
+            ZStack {
+                Color.black
 
-            if let image = entry.snapshot.image {
-                Image(decorative: image, scale: 1, orientation: .up)
-                    .resizable()
-                    .widgetAccentedRenderingMode(.fullColor)
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack(spacing: 8) {
+                if let image = entry.snapshot.image {
+                    Image(decorative: image, scale: 1, orientation: .up)
+                        .resizable()
+                        .widgetAccentedRenderingMode(.fullColor)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
                     Image(systemName: "video.slash")
-                        .font(.title)
-                    Text(emptyMessage)
-                        .font(.caption)
-                        .multilineTextAlignment(.center)
+                        .font(.title2)
+                        .foregroundColor(.white.opacity(0.65))
                 }
-                .foregroundColor(.white.opacity(0.8))
-                .padding()
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
                 Text(entry.snapshot.cameraName)
-                    .font(.caption)
-                    .fontWeight(.semibold)
+                    .font(.system(size: 9, weight: .medium))
                     .lineLimit(1)
+                    .truncationMode(.tail)
 
-                if let location = entry.snapshot.locationLabel {
-                    Text(location)
-                        .font(.caption2)
-                        .lineLimit(1)
-                }
+                Spacer(minLength: 2)
 
                 if let updatedAt = entry.snapshot.updatedAt {
                     Text(updatedAt, style: .time)
-                        .font(.caption2)
-                } else {
-                    Text("Waiting for snapshot")
-                        .font(.caption2)
+                        .font(.system(size: 9))
+                        .monospacedDigit()
+                        .fixedSize()
                 }
             }
-            .foregroundColor(.white)
-            .padding(8)
-            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 6))
-            .padding(8)
+            .foregroundColor(.white.opacity(0.85))
+            .padding(.horizontal, 6)
+            .frame(height: 18)
+            .background(Color.black)
         }
         .containerBackground(.black, for: .widget)
         .widgetURL(SnapshotStore.viewerURL(cameraId: entry.configuration.cameraId))
-    }
-
-    private var emptyMessage: String {
-        if SnapshotStore.catalog().isEmpty {
-            return "Open the camera viewer and load cameras."
-        }
-        if entry.configuration.cameraId == nil {
-            return "Right-click and choose Edit Widget to select a camera."
-        }
-        return "Waiting for the next camera snapshot. Keep the camera app open."
     }
 }
 
