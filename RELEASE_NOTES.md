@@ -1,7 +1,9 @@
-# 0.1.7
+# 0.1.8
 
 ## Fixed
 
+- Camera snapshots now scale to fit completely inside every widget family without cropping; black letterboxing preserves the camera's aspect ratio when needed.
+- Refresh documentation now distinguishes the companion app's 60-second capture-cycle target from WidgetKit's system-managed display cadence.
 - Replaced the camera `AppEntity` parameter with a primitive camera-ID string backed by a dynamic options provider. Friendly home, room, and camera names still appear in **Edit Widget**, while WidgetKit persists the selected Google camera resource ID directly.
 - Removed the duplicate host-app intent and entity definitions that caused macOS to resolve configured cameras as `nil` and display the empty widget surface.
 - Camera photographs continue to use full-color widget rendering so macOS 26 accented mode preserves the captured frame.
@@ -9,6 +11,7 @@
 ## Verification
 
 - The end-to-end widget smoke test now verifies the primitive picker option, its friendly label, the persisted camera ID, the actual timeline entry, and the rendered real Nest frame.
+- A synthetic 16:9 frame rendered into a square widget verifies that the complete frame remains visible with letterboxing instead of cropping.
 - The test rejects image-less and uniform renders and writes `build/widget-e2e-smoke.png` for visual inspection.
 - Release builds verify that extracted App Intents metadata contains a dynamically configured primitive string and no camera entities.
 

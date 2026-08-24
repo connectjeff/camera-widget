@@ -210,9 +210,8 @@ struct CameraSnapshotWidgetView: View {
                 Image(decorative: image, scale: 1, orientation: .up)
                     .resizable()
                     .widgetAccentedRenderingMode(.fullColor)
-                    .aspectRatio(contentMode: .fill)
+                    .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: "video.slash")

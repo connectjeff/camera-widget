@@ -9,6 +9,7 @@ enum WidgetSmokeFailure: Error, CustomStringConvertible {
     case timelineEntry
     case render
     case uniformRender
+    case aspectFit
 
     var description: String {
         switch self {
@@ -18,6 +19,7 @@ enum WidgetSmokeFailure: Error, CustomStringConvertible {
         case .timelineEntry: return "The timeline entry did not contain the selected camera frame"
         case .render: return "The actual widget view could not be rendered"
         case .uniformRender: return "The actual widget view collapsed to a uniform field"
+        case .aspectFit: return "The widget camera image was cropped instead of aspect-fitted"
         }
     }
 }
@@ -77,6 +79,7 @@ struct WidgetEndToEndSmoke {
         guard maximumLuminance - minimumLuminance > 0.2 || maximumAlpha - minimumAlpha > 0.2 else {
             throw WidgetSmokeFailure.uniformRender
         }
+        try verifyAspectFit()
 
         let outputURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("build/widget-e2e-smoke.png")
@@ -94,5 +97,51 @@ struct WidgetEndToEndSmoke {
         print("Configuration camera ID: \(selected.id)")
         print("Frame: \(entry.snapshot.image!.width)x\(entry.snapshot.image!.height)")
         print("Rendered: \(outputURL.path)")
+    }
+
+    @MainActor
+    private static func verifyAspectFit() throws {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: nil,
+            width: 160,
+            height: 90,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { throw WidgetSmokeFailure.aspectFit }
+        context.setFillColor(NSColor.red.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: 160, height: 90))
+        guard let testImage = context.makeImage() else { throw WidgetSmokeFailure.aspectFit }
+
+        let entry = CameraSnapshotEntry(
+            date: Date(),
+            configuration: CameraSnapshotConfiguration(cameraId: "aspect-fit-test"),
+            snapshot: CameraSnapshot(
+                image: testImage,
+                cameraName: "Camera",
+                homeName: nil,
+                roomName: nil,
+                updatedAt: nil
+            )
+        )
+        let renderer = ImageRenderer(
+            content: CameraSnapshotWidgetView(entry: entry)
+                .frame(width: 160, height: 160)
+                .environment(\.widgetRenderingMode, .accented)
+        )
+        renderer.scale = 1
+        guard let rendered = renderer.nsImage,
+              let tiff = rendered.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let letterbox = bitmap.colorAt(x: 150, y: 8)?.usingColorSpace(.deviceRGB),
+              let center = bitmap.colorAt(x: 80, y: 80)?.usingColorSpace(.deviceRGB),
+              max(letterbox.redComponent, letterbox.greenComponent, letterbox.blueComponent) < 0.1,
+              center.redComponent > 0.8,
+              center.greenComponent < 0.2,
+              center.blueComponent < 0.2 else {
+            throw WidgetSmokeFailure.aspectFit
+        }
     }
 }

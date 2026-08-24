@@ -26,7 +26,7 @@ The broadcast bridge lets you select any discovered camera and open a clean 16:9
 - Compact floating viewer mode: implemented
 - WidgetKit snapshot widget with per-widget camera configuration: implemented
 - Per-camera snapshot files for widget instances: implemented
-- Serialized stream snapshot scheduler with a target 60-second cycle: implemented
+- Serialized stream snapshot scheduler with a target 60-second capture cycle: implemented
 - Broadcast Bridge selected-camera output window for OBS/window capture: implemented
 - Native Core Media I/O virtual camera device for Teams/Zoom camera menus: planned
 - Packaged macOS `.app`: local build script support
@@ -150,7 +150,7 @@ To build a macOS installer package that installs the app into `/Applications` an
 
 ```bash
 ./build.sh --pkg
-sudo installer -pkg build/GoogleHomeCameraWidget-0.1.7.pkg -target /
+sudo installer -pkg build/GoogleHomeCameraWidget-0.1.8.pkg -target /
 open /Applications/GoogleHomeCameraWidget.app
 ```
 
@@ -163,7 +163,7 @@ See [RELEASE.md](RELEASE.md) for package verification and GitHub release publish
 ## First Run
 
 1. Confirm `Config/oauth2.local.json` exists and has your client ID and Device Access project ID.
-2. Install `build/GoogleHomeCameraWidget-0.1.7.pkg` for the system `/Applications` install that registers the desktop widget.
+2. Install `build/GoogleHomeCameraWidget-0.1.8.pkg` for the system `/Applications` install that registers the desktop widget.
 3. Open `/Applications/GoogleHomeCameraWidget.app`.
 4. Click **Sign In with Google**.
 5. Complete Google's Partner Connections Manager flow and grant camera access.
@@ -194,10 +194,10 @@ The widget is the configurable per-camera snapshot surface.
 - Widget camera choices come from the camera catalog written by the viewer app.
 - Each widget displays the latest saved snapshot and timestamp for its selected camera.
 - The viewer app runs one serialized scheduler across discovered stream-capable cameras.
-- The local bridge keeps stable per-camera sources, while the scheduler captures and writes one camera snapshot at a time. It targets a new cycle every 60 seconds while the viewer app is running; a large camera list or a slow Google stream startup can make a full cycle take longer.
+- The local bridge keeps stable per-camera sources, while the scheduler captures and writes one camera snapshot at a time. It targets a new capture cycle every 60 seconds while the viewer app is running; a large camera list or a slow Google stream startup can make a full cycle take longer.
 - The visible all-feed viewer is independent from the widget snapshot scheduler; changing zoom state in the viewer does not choose or limit which widget camera snapshots update.
 
-Apple's WidgetKit renders widgets from timelines in a separate process, and widgets are not continually active while onscreen. The widget requests a timeline refresh after 60 seconds, but macOS may throttle refreshes because WidgetKit updates are system-managed and budgeted. Keep the companion app running so it can obtain credentialed Google streams and refresh the snapshot files WidgetKit reads.
+Apple's WidgetKit renders widgets from timelines in a separate process, and widgets are not continually active while onscreen. After every successful capture, the companion app asks WidgetKit to reload the widget timeline; the widget also requests another timeline after 60 seconds as a fallback. Neither is a guaranteed display deadline. Apple recommends timeline entries at least about five minutes apart and says a frequently viewed widget's normal budget commonly works out to roughly one reload every 15–60 minutes. macOS may refresh sooner when the containing app is foreground-active or after a configuration change. Keep the companion app running so it can obtain credentialed Google streams and refresh the snapshot files WidgetKit reads.
 
 ### Nest Broadcast Bridge
 

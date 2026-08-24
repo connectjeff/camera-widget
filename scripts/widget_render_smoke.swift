@@ -19,9 +19,8 @@ func verifyAccentedRender(_ image: CGImage) {
     let content = Image(decorative: image, scale: 1, orientation: .up)
         .resizable()
         .widgetAccentedRenderingMode(.fullColor)
-        .aspectRatio(contentMode: .fill)
+        .aspectRatio(contentMode: .fit)
         .frame(width: 240, height: 160)
-        .clipped()
         .environment(\.widgetRenderingMode, .accented)
 
     let renderer = ImageRenderer(content: content)
