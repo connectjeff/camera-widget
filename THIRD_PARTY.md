@@ -16,7 +16,7 @@ The runtime also uses macOS system libraries and frameworks supplied by Apple. I
 - Xcode 26, its macOS 26 SDK, and its Swift toolchain are required only to build it locally; they are not runtime dependencies of the installer package.
 - The current packaged binaries target Apple Silicon (`arm64`).
 - The app uses Apple frameworks supplied with macOS/Xcode: SwiftUI, WidgetKit, AVKit, CryptoKit, Network, WebKit, Foundation, AppKit, and Security.
-- Native virtual-camera output for Teams/Zoom camera menus requires Apple's Core Media I/O Camera Extension and System Extensions capabilities, plus signing entitlements from an Apple Developer account.
+- A first-party virtual-camera output would require Apple's Core Media I/O Camera Extension and System Extensions capabilities, plus signing entitlements from an Apple Developer account. The supported workflow instead uses OBS Studio's signed **OBS Virtual Camera** extension.
 
 ## Google Access
 
@@ -34,8 +34,10 @@ Google may charge a one-time Device Access registration fee and may impose API q
 
 ## Camera Streaming Notes
 
-Google Nest Device Access reports camera streaming support per device. Older devices may support RTSP, while many current Google Home managed cameras report WebRTC only. This app can request RTSP streams and attempts WebRTC playback through an embedded WebKit view that creates a receive-only SDP offer and applies Google's returned SDP answer. Live stream behavior still depends on Google's account, project, camera model, protocol support, quotas, and current API behavior.
+Google Nest Device Access reports camera streaming support per device. Older devices may support RTSP, while many current Google Home managed cameras report WebRTC only. The app requests the protocol reported by SDM and uses its bundled go2rtc helper to negotiate the Google stream, provide live preview frames, and expose local OBS transports. Live behavior still depends on Google's account, project, camera model, protocol support, quotas, and current API behavior.
 
 ## Broadcast and Conferencing Notes
 
-The Broadcast Bridge currently provides a clean selected-camera output window suitable for OBS/window capture workflows. For a feed to appear directly in Microsoft Teams, Zoom, OBS, and other apps as a selectable camera device, macOS requires a Core Media I/O Camera Extension packaged with a signed host app.
+The Broadcast Bridge provides a clean selected-camera output window, a stable localhost OBS Browser Source, and an MPEG-TS fallback. OBS Studio 30 or newer is required for the supported Teams/Zoom workflow because OBS supplies the signed Core Media I/O Camera Extension exposed as **OBS Virtual Camera**. OBS is not bundled or installed automatically.
+
+A first-party camera extension remains a separate distribution project. Apple requires the host and extension to use matching developer-team signatures and entitlements, install the extension from an app in `/Applications`, obtain administrator approval, and ship through the Mac App Store or as notarized software. The repository's ad-hoc local package cannot activate such an extension under normal macOS security policy.

@@ -2,7 +2,7 @@
 
 Native macOS apps and companion capabilities for viewing and sharing Google Nest cameras through Google's Device Access / Smart Device Management API:
 
-- **Nest Camera Viewer**: a launchable SwiftUI camera wall for live feeds across homes.
+- **Nest Camera Viewer**: a launchable SwiftUI viewer with a grouped camera browser and focused live feed.
 - **Nest Camera Snapshot Widget**: a configurable WidgetKit widget where each widget instance can show a different camera's latest snapshot.
 - **Nest Broadcast Bridge**: a selected-camera broadcast surface for stream/conference workflows.
 
@@ -10,28 +10,29 @@ The viewer app handles Google OAuth through Partner Connections Manager, stores 
 
 The widget app is a configurable snapshot surface. After the viewer discovers cameras, the widget exposes those cameras in the standard **Edit Widget** camera picker. You can add one widget per camera. While the viewer app is running, an independent serialized scheduler keeps per-camera snapshot files fresh without interrupting the selected live preview.
 
-The broadcast bridge lets you select any discovered camera and open a clean 16:9 output window for OBS capture today. Native appearance as a Teams/Zoom camera device requires a signed macOS Core Media I/O Camera Extension, which is tracked separately because Apple packages virtual cameras as system extensions with signing and entitlement requirements.
+The broadcast bridge exposes a stable localhost Browser Source for OBS and a direct MPEG-TS fallback. Changing the selected camera updates the existing OBS source without changing its URL. OBS Virtual Camera then presents that output as a signed macOS camera device in Microsoft Teams, Zoom, and other camera clients. The app also retains a clean 16:9 output window for ordinary window capture.
 
 ## Status
 
 - Google Partner Connections Manager OAuth: implemented
 - SDM camera discovery: implemented
 - Single streamable-camera live viewer: implemented
-- Multi-home, multi-camera feed wall: planned after live single-camera playback is stable
-- Home and room grouping/filtering for camera lists: planned after live single-camera playback is stable
-- Click-to-zoom single feed view: planned after live single-camera playback is stable
+- Multi-home camera discovery and selection: implemented
+- Home grouping with room labels for camera lists: implemented
+- Focused one-camera live view: implemented
 - RTSP stream command: implemented
 - RTSP playback attempt with AVKit: implemented
-- WebRTC stream command and embedded playback attempt with WebKit: implemented
+- Google Nest WebRTC playback through the local go2rtc bridge: implemented
 - Compact floating viewer mode: implemented
 - WidgetKit snapshot widget with per-widget camera configuration: implemented
 - Per-camera snapshot files for widget instances: implemented
 - Serialized stream snapshot scheduler with a target 60-second capture cycle: implemented
-- Broadcast Bridge selected-camera output window for OBS/window capture: implemented
-- Native Core Media I/O virtual camera device for Teams/Zoom camera menus: planned
+- Stable OBS Browser Source with live camera switching: implemented
+- MPEG-TS OBS fallback and live output test: implemented
+- OBS Virtual Camera handoff for Teams/Zoom camera menus: implemented
+- First-party Core Media I/O virtual camera extension: deferred; requires Developer ID signing, Apple entitlements, and notarization
 - Packaged macOS `.app`: local build script support
 - Distributed signed/notarized release: not implemented
-- Continuous in-widget live video feasibility work: pending
 
 ## Runtime Requirements
 
@@ -39,6 +40,7 @@ The broadcast bridge lets you select any discovered camera and open a clean 16:9
 - Apple Silicon Mac (the current app and bundled go2rtc helper are arm64)
 - Homebrew for installer-managed media dependencies
 - FFmpeg for live preview frames and widget snapshots; the package installs the Homebrew formula automatically when Homebrew is present
+- OBS Studio 30 or newer for Broadcast Bridge output in Teams, Zoom, and other camera clients; ordinary viewer and widget use does not require OBS
 - A consumer Google Account that manages compatible Nest cameras
 - Google Device Access registration and a Device Access project
 - A Google Cloud OAuth client associated with that Device Access project
@@ -119,17 +121,17 @@ Run automated smoke checks:
 scripts/integration_smoke.sh
 ```
 
-The smoke script builds the app, verifies streamable-camera selection rules using mock camera data, and launches the app briefly with `CAMERA_WIDGET_USE_MOCK_CAMERAS=1` to catch immediate startup crashes without requiring Google credentials.
+The smoke script builds the app and verifies streamable-camera selection rules, application state, and the stable localhost broadcast source using headless fixtures. It does not launch a visible test window or require Google credentials.
 
 It also runs `scripts/widget_e2e_smoke.sh` against the current real camera catalog and cached Nest snapshots. That check verifies a dynamically labeled primitive camera option, persists its camera ID into the widget configuration, builds the same timeline entry used by WidgetKit, renders the actual widget view in accented mode, rejects empty or uniform image output, and writes `build/widget-e2e-smoke.png` for inspection. It does not install the app or modify desktop widgets.
 
-It also runs the binary's video decode check:
+After selecting a camera in Broadcast Bridge, run the credentialed broadcast check:
 
 ```bash
-.build/release/GoogleHomeCameraWidget --video-smoke-test
+scripts/broadcast_smoke.sh
 ```
 
-That check loads the built-in AVKit HLS preview stream and waits until `AVPlayer` decodes an actual video frame. It proves the local video player path can display video without reinstalling the app or using Google credentials.
+It validates the stable OBS page, receives a real camera JPEG, decodes 30 frames from the exact MPEG-TS fallback transport, and verifies the signed OBS camera extension. See [BROADCAST_TEST_PLAN.md](BROADCAST_TEST_PLAN.md) for the complete OBS, Teams, and Zoom acceptance test.
 
 Run the credentialed real-camera smoke test after signing in:
 
@@ -150,7 +152,7 @@ To build a macOS installer package that installs the app into `/Applications` an
 
 ```bash
 ./build.sh --pkg
-sudo installer -pkg build/GoogleHomeCameraWidget-0.1.9.pkg -target /
+sudo installer -pkg build/GoogleHomeCameraWidget-0.2.0.pkg -target /
 open /Applications/GoogleHomeCameraWidget.app
 ```
 
@@ -163,7 +165,7 @@ See [RELEASE.md](RELEASE.md) for package verification and GitHub release publish
 ## First Run
 
 1. Confirm `Config/oauth2.local.json` exists and has your client ID and Device Access project ID.
-2. Install `build/GoogleHomeCameraWidget-0.1.9.pkg` for the system `/Applications` install that registers the desktop widget.
+2. Install `build/GoogleHomeCameraWidget-0.2.0.pkg` for the system `/Applications` install that registers the desktop widget.
 3. Open `/Applications/GoogleHomeCameraWidget.app`.
 4. Click **Sign In with Google**.
 5. Complete Google's Partner Connections Manager flow and grant camera access.
@@ -171,9 +173,10 @@ See [RELEASE.md](RELEASE.md) for package verification and GitHub release publish
 7. Select one streamable camera from the grouped camera list.
 8. Confirm the selected camera starts streaming in the preview panel.
 9. Toggle **Widget Mode** to keep the viewer as a compact floating camera window on the desktop.
-10. Switch to **Broadcast Bridge**, select a camera, and open the clean broadcast feed window for OBS/window capture workflows.
-11. Add the **Nest Camera Snapshot** widget from macOS widget editing.
-12. Edit the widget and choose the camera for that widget instance. You can add one widget per camera.
+10. Switch to **Broadcast Bridge**, select a camera, and wait for the live output test to report ready.
+11. Copy the stable OBS Browser Source URL or open the clean broadcast feed window.
+12. Add the **Nest Camera Snapshot** widget from macOS widget editing.
+13. Edit the widget and choose the camera for that widget instance. You can add one widget per camera.
 
 ## Apps
 
@@ -201,13 +204,17 @@ Apple's WidgetKit renders widgets from timelines in a separate process, and widg
 
 ### Nest Broadcast Bridge
 
-The broadcast bridge is the selected-camera sharing surface.
+The broadcast bridge is the selected-camera sharing surface for OBS and conferencing apps.
 
 - Selects any camera discovered by the authenticated viewer session.
+- Hosts a stable Browser Source at `http://127.0.0.1:11985/`; changing cameras updates the source automatically.
+- Provides a camera-specific MPEG-TS fallback URL for OBS Media Source.
+- Tests the selected source by retrieving a real frame before reporting it ready.
+- Opens OBS directly and copies either source URL without exposing Google credentials.
 - Opens a dedicated 16:9 output window titled for the selected camera.
 - Uses the same live-feed negotiation as the viewer while staying independent from the viewer grid and widget snapshot workers.
-- Provides an OBS-friendly capture surface immediately.
-- Tracks native Teams/Zoom camera-menu support as a Core Media I/O Camera Extension, which requires a signed system extension host app and app-group communication.
+- Uses OBS Virtual Camera to provide the signed camera device selected in Teams and Zoom.
+- Does not carry audio through the virtual camera; select a microphone separately in OBS or the conferencing app.
 
 ## Security
 

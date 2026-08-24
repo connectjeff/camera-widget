@@ -834,8 +834,150 @@ final class LiveFeedCoordinator: ObservableObject {
     }
 }
 
+struct BroadcastOutputDescriptor: Equatable {
+    let cameraId: String
+    let browserSourceURL: URL
+    let mediaSourceURL: URL
+    let frameURL: URL
+}
+
+final class BroadcastSourceServer {
+    static let shared = BroadcastSourceServer()
+
+    private let queue = DispatchQueue(label: "com.jeffalderson.google-home-camera-widget.broadcast-source")
+    private let port = NWEndpoint.Port(rawValue: 11985)!
+    private var listener: NWListener?
+    private var sourceId: String?
+    private var revision = 0
+
+    private init() {}
+
+    func publish(sourceId: String) throws -> URL {
+        try startIfNeeded()
+        queue.sync {
+            self.sourceId = sourceId
+            self.revision += 1
+        }
+        return URL(string: "http://127.0.0.1:\(port.rawValue)/")!
+    }
+
+    func clear() {
+        queue.async {
+            self.sourceId = nil
+            self.revision += 1
+        }
+    }
+
+    private func startIfNeeded() throws {
+        guard listener == nil else { return }
+
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port)
+        let listener = try NWListener(using: parameters)
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.accept(connection)
+        }
+        listener.stateUpdateHandler = { state in
+            if case .failed(let error) = state {
+                fputs("Broadcast source server failed: \(error.localizedDescription)\n", stderr)
+            }
+        }
+        self.listener = listener
+        listener.start(queue: queue)
+    }
+
+    private func accept(_ connection: NWConnection) {
+        connection.start(queue: queue)
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, _, _ in
+            guard let self,
+                  let data,
+                  let request = String(data: data, encoding: .utf8),
+                  let requestLine = request.split(separator: "\r\n").first else {
+                connection.cancel()
+                return
+            }
+
+            let parts = requestLine.split(separator: " ")
+            let path = parts.count > 1 ? String(parts[1]) : "/"
+            self.respond(to: connection, path: path)
+        }
+    }
+
+    private func respond(to connection: NWConnection, path: String) {
+        let cleanPath = URLComponents(string: "http://localhost\(path)")?.path ?? path
+        let response: (status: String, contentType: String, body: Data)
+
+        switch cleanPath {
+        case "/", "/index.html":
+            response = ("200 OK", "text/html; charset=utf-8", Data(Self.html.utf8))
+        case "/source":
+            let body = try? JSONSerialization.data(withJSONObject: [
+                "sourceId": sourceId ?? "",
+                "revision": revision
+            ])
+            response = ("200 OK", "application/json", body ?? Data("{}".utf8))
+        case "/health":
+            response = ("200 OK", "text/plain; charset=utf-8", Data("ok".utf8))
+        default:
+            response = ("404 Not Found", "text/plain; charset=utf-8", Data("Not found".utf8))
+        }
+
+        let headers = [
+            "HTTP/1.1 \(response.status)",
+            "Content-Type: \(response.contentType)",
+            "Content-Length: \(response.body.count)",
+            "Cache-Control: no-store",
+            "Connection: close",
+            "",
+            ""
+        ].joined(separator: "\r\n")
+        var payload = Data(headers.utf8)
+        payload.append(response.body)
+        connection.send(content: payload, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+
+    private static let html = """
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <style>
+        html, body, iframe { width: 100%; height: 100%; margin: 0; border: 0; overflow: hidden; background: #000; }
+      </style>
+    </head>
+    <body>
+      <iframe id="player" allow="autoplay; fullscreen"></iframe>
+      <script>
+        let revision = -1;
+        async function update() {
+          try {
+            const response = await fetch('/source', { cache: 'no-store' });
+            const state = await response.json();
+            if (state.revision !== revision) {
+              revision = state.revision;
+              const player = document.getElementById('player');
+              player.src = state.sourceId
+                ? `http://127.0.0.1:11984/stream.html?src=${encodeURIComponent(state.sourceId)}&mode=webrtc&width=100%25&background=false`
+                : 'about:blank';
+            }
+          } catch (_) {}
+        }
+        update();
+        setInterval(update, 1000);
+      </script>
+    </body>
+    </html>
+    """
+}
+
 @MainActor
 final class BroadcastBridgeController: ObservableObject {
+    @Published private(set) var output: BroadcastOutputDescriptor?
+    @Published private(set) var outputStatus = "Select a camera to prepare the OBS source"
+
     private var models: [String: LiveFeedModel] = [:]
     private var window: NSWindow?
 
@@ -879,6 +1021,81 @@ final class BroadcastBridgeController: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         model.start(authManager: authManager)
     }
+
+    func prepareOutput(camera: GoogleCamera, authManager: AuthManager) {
+        do {
+            let endpoints = try Go2RTCBridgeManager.shared.broadcastEndpoints(for: camera, authManager: authManager)
+            let browserURL = try BroadcastSourceServer.shared.publish(sourceId: endpoints.sourceId)
+            let descriptor = BroadcastOutputDescriptor(
+                cameraId: camera.id,
+                browserSourceURL: browserURL,
+                mediaSourceURL: endpoints.mediaURL,
+                frameURL: endpoints.frameURL
+            )
+            output = descriptor
+            outputStatus = "Testing live output for \(camera.displayName)..."
+            verify(descriptor: descriptor, cameraName: camera.displayName)
+        } catch {
+            output = nil
+            outputStatus = "OBS output unavailable: \(error.localizedDescription)"
+        }
+    }
+
+    func copyBrowserSourceURL() {
+        guard let output else { return }
+        copy(output.browserSourceURL.absoluteString)
+        outputStatus = "OBS Browser Source URL copied"
+    }
+
+    func copyMediaSourceURL() {
+        guard let output else { return }
+        copy(output.mediaSourceURL.absoluteString)
+        outputStatus = "MPEG-TS fallback URL copied"
+    }
+
+    func openOBS() {
+        let url = URL(fileURLWithPath: "/Applications/OBS.app", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            outputStatus = "OBS is not installed in /Applications"
+            return
+        }
+        NSWorkspace.shared.openApplication(at: url, configuration: .init()) { [weak self] _, error in
+            if let error {
+                Task { @MainActor in
+                    self?.outputStatus = "Unable to open OBS: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func reset() {
+        models.values.forEach { $0.stop() }
+        models.removeAll()
+        window?.orderOut(nil)
+        window?.contentView = nil
+        output = nil
+        outputStatus = "Select a camera to prepare the OBS source"
+        BroadcastSourceServer.shared.clear()
+    }
+
+    private func verify(descriptor: BroadcastOutputDescriptor, cameraName: String) {
+        URLSession.shared.dataTask(with: URLRequest(url: descriptor.frameURL, timeoutInterval: 30)) { [weak self] data, _, error in
+            let image = data.flatMap(NSImage.init(data:))
+            Task { @MainActor in
+                guard let self, self.output == descriptor else { return }
+                if let image, image.size.width > 0, image.size.height > 0 {
+                    self.outputStatus = "Ready: received \(Int(image.size.width))x\(Int(image.size.height)) from \(cameraName)"
+                } else {
+                    self.outputStatus = "Output prepared, but the first frame test failed: \(error?.localizedDescription ?? "no image received")"
+                }
+            }
+        }.resume()
+    }
+
+    private func copy(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+    }
 }
 
 @MainActor
@@ -906,6 +1123,16 @@ final class Go2RTCBridgeManager {
     func mjpegURL(for camera: GoogleCamera, authManager: AuthManager) throws -> URL {
         try ensureBridge(for: camera, authManager: authManager)
         return mjpegURL(sourceId: sourceId(for: camera))
+    }
+
+    func broadcastEndpoints(for camera: GoogleCamera, authManager: AuthManager) throws -> (sourceId: String, mediaURL: URL, frameURL: URL) {
+        try ensureBridge(for: camera, authManager: authManager)
+        let sourceId = sourceId(for: camera)
+        return (
+            sourceId,
+            URL(string: "http://127.0.0.1:11984/api/stream.ts?src=\(sourceId)")!,
+            frameURL(sourceId: sourceId)
+        )
     }
 
     func captureFrame(for camera: GoogleCamera, authManager: AuthManager, completion: @escaping (NSImage?) -> Void) {
@@ -1791,8 +2018,10 @@ struct CameraView: View {
     @StateObject private var authManager = AuthManager()
     @StateObject private var cameraManager = CameraManager()
     @StateObject private var liveFeedCoordinator = LiveFeedCoordinator()
+    @StateObject private var broadcastBridgeController = BroadcastBridgeController()
     @ObservedObject private var snapshotScheduler = SnapshotScheduler.shared
     @AppStorage("viewerLastSelectedCameraId") private var selectedCameraId = ""
+    @AppStorage("selectedAppSurface") private var selectedSurfaceRawValue = AppSurface.viewer.rawValue
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1806,7 +2035,7 @@ struct CameraView: View {
             } else if streamableCameras.isEmpty {
                 emptyCameraView
             } else {
-                singleCameraView
+                activeSurface
             }
         }
         .frame(minWidth: 720, idealWidth: 820, minHeight: 500, idealHeight: 560)
@@ -1827,23 +2056,52 @@ struct CameraView: View {
 
     private var header: some View {
         HStack {
-            Label("Nest Camera Viewer", systemImage: "video")
+            Label(selectedSurface.title, systemImage: selectedSurface.systemImage)
                 .font(.headline)
+
+            if authManager.isAuthenticated {
+                Picker("Mode", selection: selectedSurfaceBinding) {
+                    ForEach(AppSurface.allCases) { surface in
+                        Text(surface.shortTitle).tag(surface)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 190)
+                .padding(.leading, 12)
+            }
+
             Spacer()
             if authManager.isAuthenticated {
                 HeaderAction(title: "Refresh", systemImage: "arrow.clockwise") {
                     liveFeedCoordinator.reset()
+                    broadcastBridgeController.reset()
                     cameraManager.loadCameras(authManager: authManager)
                 }
 
                 HeaderAction(title: "Sign Out", systemImage: "rectangle.portrait.and.arrow.right") {
                     liveFeedCoordinator.reset()
+                    broadcastBridgeController.reset()
                     SnapshotScheduler.shared.stopAll()
                     authManager.signOut()
                 }
             }
         }
         .padding()
+    }
+
+    @ViewBuilder
+    private var activeSurface: some View {
+        switch selectedSurface {
+        case .viewer:
+            singleCameraView
+        case .broadcast:
+            BroadcastBridgeView(
+                cameras: streamableCameras,
+                authManager: authManager,
+                controller: broadcastBridgeController
+            )
+        }
     }
 
     private var loadingView: some View {
@@ -1953,6 +2211,17 @@ struct CameraView: View {
 
     private var streamableCameras: [GoogleCamera] {
         CameraSelectionLogic.streamableCameras(from: cameraManager.cameras)
+    }
+
+    private var selectedSurface: AppSurface {
+        AppSurface(rawValue: selectedSurfaceRawValue) ?? .viewer
+    }
+
+    private var selectedSurfaceBinding: Binding<AppSurface> {
+        Binding(
+            get: { selectedSurface },
+            set: { selectedSurfaceRawValue = $0.rawValue }
+        )
     }
 
     private var selectedCamera: GoogleCamera? {
@@ -2226,6 +2495,13 @@ enum AppSurface: String, CaseIterable, Identifiable {
         }
     }
 
+    var shortTitle: String {
+        switch self {
+        case .viewer: "Viewer"
+        case .broadcast: "Broadcast"
+        }
+    }
+
     var systemImage: String {
         switch self {
         case .viewer: "video"
@@ -2292,6 +2568,37 @@ struct BroadcastBridgeView: View {
                     .disabled(selectedCamera == nil)
                 }
 
+                HStack(spacing: 8) {
+                    Button {
+                        controller.copyBrowserSourceURL()
+                    } label: {
+                        Label("Copy OBS Source", systemImage: "link")
+                    }
+                    .disabled(controller.output?.cameraId != selectedCamera?.id)
+
+                    Button {
+                        controller.copyMediaSourceURL()
+                    } label: {
+                        Label("Copy MPEG-TS", systemImage: "waveform.path")
+                    }
+                    .disabled(controller.output?.cameraId != selectedCamera?.id)
+
+                    Button {
+                        controller.openOBS()
+                    } label: {
+                        Label("Open OBS", systemImage: "arrow.up.forward.app")
+                    }
+
+                    Spacer()
+
+                    Label(controller.outputStatus, systemImage: outputStatusIcon)
+                        .font(.caption)
+                        .foregroundColor(outputStatusColor)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 420, alignment: .trailing)
+                }
+
                 if let camera = selectedCamera {
                     CameraFeedTile(
                         camera: camera,
@@ -2310,21 +2617,30 @@ struct BroadcastBridgeView: View {
 
             Divider()
             HStack {
-                Label("OBS-ready capture window today", systemImage: "display")
+                Label("Stable localhost source for OBS Browser Source", systemImage: "display")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
-                Label("Native Teams/Zoom camera device requires a signed Core Media I/O Camera Extension", systemImage: "camera.badge.ellipsis")
+                Label("Use OBS Virtual Camera in Teams and Zoom", systemImage: "video.badge.checkmark")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
-        .onAppear {
-            if selectedCameraId.isEmpty, let first = cameras.first {
-                selectedCameraId = first.id
+        .onChange(of: selectedCameraId) { _, _ in
+            if let camera = selectedCamera {
+                controller.prepareOutput(camera: camera, authManager: authManager)
             }
+        }
+        .onAppear {
+            clearInvalidSelection()
+            if let camera = selectedCamera {
+                controller.prepareOutput(camera: camera, authManager: authManager)
+            }
+        }
+        .onChange(of: cameras) {
+            clearInvalidSelection()
         }
     }
 
@@ -2343,7 +2659,21 @@ struct BroadcastBridgeView: View {
     }
 
     private var selectedCamera: GoogleCamera? {
-        cameras.first { $0.id == selectedCameraId } ?? cameras.first
+        cameras.first { $0.id == selectedCameraId }
+    }
+
+    private var outputStatusIcon: String {
+        if controller.outputStatus.hasPrefix("Ready:") {
+            return "checkmark.circle.fill"
+        }
+        if controller.outputStatus.hasPrefix("Testing") {
+            return "clock"
+        }
+        return "info.circle"
+    }
+
+    private var outputStatusColor: Color {
+        controller.outputStatus.hasPrefix("Ready:") ? .green : .secondary
     }
 
     private var groupedCameras: [(home: String, cameras: [GoogleCamera])] {
@@ -2352,6 +2682,13 @@ struct BroadcastBridgeView: View {
                 (home, cameras.sorted { $0.fullDisplayName.localizedCaseInsensitiveCompare($1.fullDisplayName) == .orderedAscending })
             }
             .sorted { $0.home.localizedCaseInsensitiveCompare($1.home) == .orderedAscending }
+    }
+
+    private func clearInvalidSelection() {
+        if !selectedCameraId.isEmpty && !cameras.contains(where: { $0.id == selectedCameraId }) {
+            selectedCameraId = ""
+            controller.reset()
+        }
     }
 }
 
@@ -4003,6 +4340,47 @@ final class CredentialedWebRTCSmokeSession: NSObject, WKScriptMessageHandler, WK
     """
 }
 
+enum BroadcastSourceServerSmokeTest {
+    static func run() -> Int32 {
+        do {
+            let url = try BroadcastSourceServer.shared.publish(sourceId: "camera_smoke_test")
+            guard let root = request(url),
+                  String(data: root, encoding: .utf8)?.contains("/source") == true,
+                  let source = request(url.appendingPathComponent("source")),
+                  let payload = try JSONSerialization.jsonObject(with: source) as? [String: Any],
+                  payload["sourceId"] as? String == "camera_smoke_test",
+                  let health = request(url.appendingPathComponent("health")),
+                  String(data: health, encoding: .utf8) == "ok" else {
+                fputs("Broadcast source server returned invalid content.\n", stderr)
+                return 1
+            }
+            print("Broadcast source server smoke test passed at \(url.absoluteString)")
+            return 0
+        } catch {
+            fputs("Broadcast source server smoke test failed: \(error.localizedDescription)\n", stderr)
+            return 1
+        }
+    }
+
+    private static func request(_ url: URL) -> Data? {
+        let semaphore = DispatchSemaphore(value: 0)
+        final class Box { var data: Data? }
+        let box = Box()
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            if let response = response as? HTTPURLResponse,
+               response.statusCode == 200 {
+                box.data = data
+            }
+            semaphore.signal()
+        }.resume()
+
+        return semaphore.wait(timeout: .now() + 6) == .success ? box.data : nil
+    }
+}
+
 @main
 struct GoogleHomeCameraWidgetApp: App {
     private static let isCredentialedSmokeTest = CommandLine.arguments.contains("--nest-camera-smoke-test")
@@ -4013,6 +4391,9 @@ struct GoogleHomeCameraWidgetApp: App {
         }
         if CommandLine.arguments.contains("--video-smoke-test") {
             exit(VideoPreviewSmokeTest.run())
+        }
+        if CommandLine.arguments.contains("--broadcast-source-smoke-test") {
+            exit(BroadcastSourceServerSmokeTest.run())
         }
         if Self.isCredentialedSmokeTest {
             exit(CredentialedNestSmokeTest.run())

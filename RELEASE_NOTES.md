@@ -1,7 +1,10 @@
-# 0.1.9
+# 0.2.0
 
 ## Fixed
 
+- Added a stable, credential-free localhost Browser Source for OBS. Configure the URL once; selecting another camera in Broadcast Bridge updates the existing OBS source automatically.
+- Added a direct MPEG-TS fallback, an in-app live-frame readiness check, and a credentialed smoke test that decodes 30 real camera frames.
+- Added direct OBS launch and source-copy controls plus an end-to-end OBS, Microsoft Teams, and Zoom acceptance plan.
 - Removed the home, room, and status overlays from camera frames. Widgets now reserve a compact footer below the uncropped image for only the camera name and capture time.
 - Camera snapshots now scale to fit completely inside every widget family without cropping; black letterboxing preserves the camera's aspect ratio when needed.
 - Refresh documentation now distinguishes the companion app's 60-second capture-cycle target from WidgetKit's system-managed display cadence.

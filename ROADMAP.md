@@ -2,28 +2,25 @@
 
 ## Track 1: Companion Floating Camera Viewer
 
-Purpose: a launchable macOS app for credentialed live-stream testing and always-on desktop viewing.
+Purpose: a launchable macOS app for focused live viewing and always-on desktop use.
 
 Status:
 
 - Google OAuth through Partner Connections Manager.
 - Tokens stored in macOS Keychain.
 - Device Access camera discovery.
-- Multi-home, multi-camera feed wall.
-- Click-to-zoom single camera view with return to all feeds.
-- RTSP stream request and AVKit playback attempt.
-- WebRTC stream request and embedded WebKit playback attempt.
+- Streamable-camera selection across multiple homes with room labels.
+- Focused single-camera live view that remembers the last selection.
+- RTSP and WebRTC stream requests through the local go2rtc bridge.
+- Live frame rendering with visible connection progress.
 - Compact floating window mode.
 - Runs a serialized snapshot scheduler with stable per-camera bridge sources and a target 60-second cycle.
-- Local `.app` installer through `build.sh --install`.
+- System `/Applications` installer package through `build.sh --pkg`.
 
 Remaining:
 
-- Validate RTSP and WebRTC behavior against real Google Nest cameras.
-- Add clearer per-camera diagnostics after the first live-device test.
 - Add stream stop/cleanup commands for RTSP sessions.
 - Add throttling controls if Google API quotas are hit with many simultaneous cameras.
-- Add user controls for pausing/resuming the visible camera wall separately from widget snapshots.
 - Add signed/notarized release packaging if the app will be shared outside local development.
 
 ## Track 2: WidgetKit Camera Widget
@@ -39,12 +36,13 @@ Status:
 - Widget reads the latest saved per-camera snapshot and timestamp.
 - Xcode-generated App Intents metadata supports the standard macOS **Edit Widget** camera picker.
 - Installer embeds and registers the sandboxed WidgetKit extension.
+- Captured images scale to fit without cropping and show only the camera name and capture time below the frame.
+- Clicking a configured widget opens the viewer for that camera.
+- The companion scheduler targets a new snapshot every 60 seconds; WidgetKit controls when a refreshed timeline is displayed.
 
 Remaining:
 
-- Determine whether macOS WidgetKit can host continuous WebRTC/RTSP playback in practice.
 - Replace the local-build file access entitlement with a provisioned App Group for a signed distribution.
-- If continuous playback is blocked by WidgetKit, implement the best viable widget behavior: selected-camera tile, latest safe preview state, status, and a direct handoff into the companion viewer for live video.
 
 ## Track 3: Broadcast / Virtual Camera Bridge
 
@@ -56,12 +54,13 @@ Status:
 - Selects a camera independently from the viewer zoom state and widget snapshot selection.
 - Opens a clean 16:9 broadcast feed window for OBS window capture or conferencing screen-share workflows.
 - Reuses RTSP/WebRTC stream negotiation from the viewer.
+- Hosts one stable localhost Browser Source for OBS and switches its underlying camera without requiring OBS reconfiguration.
+- Provides an MPEG-TS fallback and an automated credentialed transport test.
+- Uses OBS Virtual Camera as the signed system-camera handoff to Teams and Zoom.
 
-Remaining:
+Optional future work:
 
-- Validate OBS window capture against a live Nest feed.
-- Add optional local browser-source output for OBS if window capture is not enough.
-- Build a signed Core Media I/O Camera Extension so the feed appears as a native camera device in Teams, Zoom, OBS, and other camera clients.
+- Build a first-party signed Core Media I/O Camera Extension to remove the OBS dependency.
 - Add app-group shared state between the host app and camera extension.
 - Add extension install/activation UI using System Extensions.
 - Add frame delivery from the selected Nest feed into the Core Media I/O stream source.
